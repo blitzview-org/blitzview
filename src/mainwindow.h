@@ -16,6 +16,8 @@ class MainWindow : public QMainWindow
 public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+    
+    void openImageFile(const QString &filePath);
 
 private slots:
     void openImage();

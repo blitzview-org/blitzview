@@ -162,6 +162,11 @@ void MainWindow::onFileClicked(const QModelIndex &index)
     loadImage(filePath);
 }
 
+void MainWindow::openImageFile(const QString &filePath)
+{
+    loadImage(filePath);
+}
+
 void MainWindow::loadImage(const QString &filePath)
 {
     QImageReader reader(filePath);
