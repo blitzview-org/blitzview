@@ -1,0 +1,49 @@
+# C++ build artifacts
+*.o
+*.obj
+*.so
+*.so.*
+*.a
+*.lib
+*.exe
+*.dll
+*.dylib
+*.out
+*.app
+
+# CMake build directories and files
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# Qt generated files
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.pro.user
+*.pro.user.*
+*.qmlc
+*.jsc
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.autosave
+.clangd/
+compile_commands.json
+
+# Other
+*.log
+*.bak
+*.orig
