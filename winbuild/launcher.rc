@@ -1,0 +1,3 @@
+/* The visible executable's Explorer icon. icon.ico is generated from
+   res/BlitzViewIcon.png by the Makefile, so it is not checked in. */
+1 ICON "icon.ico"

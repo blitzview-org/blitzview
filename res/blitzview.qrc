@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>BlitzViewLogo.png</file>
+        <file>BlitzViewIcon.png</file>
+    </qresource>
+</RCC>
