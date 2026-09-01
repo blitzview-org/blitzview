@@ -1,0 +1,40 @@
+name: Release
+
+# Publishes a real (non-prerelease) GitHub Release with both portable
+# packages whenever a version tag (vX.Y.Z) is pushed. v0.0.0 is excluded: it
+# is only the genesis tag that gives `git describe` a base to count from,
+# not a real release.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    if: github.ref_name != 'v0.0.0'
+    uses: ./.github/workflows/build-portable.yml
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # One artifact per platform (see build-portable.yml). merge-multiple
+      # unpacks both into the same directory, restoring linux/ and windows/.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: portable-*
+          merge-multiple: true
+          path: .
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" linux/*.tar.gz windows/*.zip \
+            --title "${{ github.ref_name }}"

@@ -1,0 +1,58 @@
+name: CI
+
+# Verifies every commit on master actually builds and runs on both target
+# platforms, and republishes the result as the rolling "latest-dev"
+# pre-release so anyone can download the newest commit without waiting for a
+# tagged version.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Two pushes in quick succession used to run two full builds side by side --
+# and if no cached image existed yet, BOTH rebuilt the 7 GB builder image from
+# scratch (~15 minutes each) because neither could see the other's push.
+# Superseded runs are now cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-portable.yml
+
+  publish-latest-dev:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # One artifact per platform (see build-portable.yml). merge-multiple
+      # unpacks both into the same directory, restoring linux/ and windows/.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: portable-*
+          merge-multiple: true
+          path: .
+
+      # Delete the old release AND its tag, then let `gh release create`
+      # recreate the tag fresh at the new target commit via the API. A raw
+      # `git push -f` that MOVES an existing tag is rejected by GitHub
+      # whenever the target commit changes a file under .github/workflows/
+      # ("refusing to allow a GitHub App to ... update workflow ... without
+      # `workflows` permission" — a hard restriction GITHUB_TOKEN can never
+      # be granted). Creating the tag fresh sidesteps that check entirely.
+      - name: Publish rolling pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest-dev --yes --cleanup-tag || true
+          gh release create latest-dev linux/*.tar.gz windows/*.zip \
+            --prerelease \
+            --title "Development build" \
+            --target "$(git rev-parse HEAD)" \
+            --notes "Automatically built from the latest commit on master ($(git rev-parse --short HEAD)). Not a release — see the Releases page for tagged versions."

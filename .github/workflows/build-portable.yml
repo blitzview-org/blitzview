@@ -1,0 +1,102 @@
+name: Build portable apps
+
+# Reusable workflow: builds the Linux and Windows portable packages via the
+# combined AlmaLinux 8 builder image (see docker/, Makefile) and smoke-tests
+# them. Called by ci.yml (every push to master) and release.yml (version tags).
+#
+# The two platforms run as separate matrix jobs. That is not just concurrency:
+# each job gets its own runner, so the two builds no longer share one runner's
+# four cores. Both jobs pull the SAME image -- a Windows-only image could not be
+# meaningfully smaller, because the cross-build needs the Linux Qt as
+# QT_HOST_PATH (winbuild/build.sh) on top of MinGW, Wine and the Windows Qt.
+#
+# Each job uploads its own artifact ("portable-linux" / "portable-windows"),
+# with dist/ as the artifact root so the platform subdirectory is preserved.
+# The publishing jobs merge them back with `pattern: portable-*` +
+# `merge-multiple: true`, which restores the layout their release globs expect.
+on:
+  workflow_call:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The names do not follow a common pattern (linuxbuild/ vs winbuild/),
+          # so every job carries its own explicitly.
+          - platform: linux
+            scripts: linuxbuild
+            # System libraries the portable package deliberately does NOT
+            # bundle (see the is_bundlable rule in linuxbuild/deploy.sh), but
+            # which a bare ubuntu-latest runner lacks, unlike a real desktop:
+            #   - the Mesa/GLVND set: the runner has no GL stack at all
+            #   - libpulse0: pulled in by libQt6Multimedia, so it is needed at
+            #     startup. It used to arrive by accident as a dependency of
+            #     wine, back when one job built both platforms.
+            apt: xvfb libopengl0 libglx-mesa0 libgl1 libegl1 libgles2 libglvnd0 libpulse0
+          - platform: windows
+            scripts: winbuild
+            apt: xvfb wine
+    name: build (${{ matrix.platform }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags: git describe needs both
+
+      - name: Install smoke-test dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y ${{ matrix.apt }}
+
+      # The builder image (~7 GB: Qt 6.8.3 for both platforms + MinGW
+      # cross-compiler + Wine + FFmpeg headers) is cached in GHCR, keyed by a
+      # hash of the files that define its content. Rebuilt only when one of
+      # those actually changes.
+      #
+      # This key is only complete because the image contains NOTHING from
+      # outside docker/ -- the build and deploy scripts are read from the
+      # bind-mounted checkout at build time (see docker/Dockerfile). Never
+      # COPY a file from elsewhere into the image without adding it here, or
+      # edits to it will silently hit the cache and be ignored.
+      - name: Compute builder image cache key
+        id: key
+        run: |
+          key=$(cat docker/Dockerfile docker/deps.env docker/deps.sh docker/importlibs.sh | sha256sum | cut -c1-12)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull or build the builder image
+        env:
+          IMG: ghcr.io/blitzview-org/blitzview-build:${{ steps.key.outputs.key }}
+        run: |
+          if docker pull "$IMG"; then
+            docker tag "$IMG" blitzview-build
+          else
+            echo "no cached image for this key, building from scratch"
+            make build-image-force PODMAN=docker BUILD_IMAGE=blitzview-build
+            docker tag blitzview-build "$IMG"
+            docker push "$IMG"
+            docker tag blitzview-build ghcr.io/blitzview-org/blitzview-build:latest
+            docker push ghcr.io/blitzview-org/blitzview-build:latest
+          fi
+
+      - name: Build portable package
+        run: make ${{ matrix.platform }}-portable PODMAN=docker BUILD_IMAGE=blitzview-build
+
+      - name: Smoke test
+        run: ${{ matrix.scripts }}/smoke-test.sh build/${{ matrix.platform }}/BlitzView
+
+      # path: dist (not dist/<platform>/*) keeps the platform directory inside
+      # the artifact, which is what the merged download in ci.yml and
+      # release.yml globs against.
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-${{ matrix.platform }}
+          path: dist
+          retention-days: 14
