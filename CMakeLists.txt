@@ -236,3 +236,35 @@ if(WIN32)
     # DbgHelp backs the stack trace in QtDebugStacktrace.h.
     target_link_libraries(blitzview PRIVATE dbghelp)
 endif()
+
+# ---------------------------------------------------------------------------
+# macOS app bundle. Unlike Windows there is no separate launcher target: the
+# .app bundle itself is the single user-visible entry point, so OUTPUT_NAME
+# is set to the mixed-case product name directly (Wine's case-insensitivity
+# problem that forces blitzview-launcher.exe's rename dance does not apply
+# here). CMake generates Info.plist from its built-in template using the
+# MACOSX_BUNDLE_* properties below -- no checked-in template needed.
+# ---------------------------------------------------------------------------
+if(APPLE)
+    set_target_properties(blitzview PROPERTIES
+        OUTPUT_NAME "BlitzView"
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "BlitzView"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "org.blitzview.blitzview"
+        MACOSX_BUNDLE_ICON_FILE "BlitzView.icns")
+
+    # The icon is generated from res/BlitzViewIcon-macos.png by the Makefile
+    # into the build directory (build/macos/BlitzView.icns) and is not
+    # checked in; same "cosmetic asset must never break a build" rule as
+    # winbuild/icon.ico. The source file's basename here MUST match
+    # MACOSX_BUNDLE_ICON_FILE above -- MACOSX_PACKAGE_LOCATION copies it into
+    # Resources under its own name, not under CFBundleIconFile's name, so a
+    # mismatch silently produces a bundle with no visible icon.
+    if(EXISTS "${CMAKE_BINARY_DIR}/BlitzView.icns")
+        target_sources(blitzview PRIVATE "${CMAKE_BINARY_DIR}/BlitzView.icns")
+        set_source_files_properties("${CMAKE_BINARY_DIR}/BlitzView.icns" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources")
+    else()
+        message(STATUS "BlitzView.icns missing - app bundle gets no icon")
+    endif()
+endif()

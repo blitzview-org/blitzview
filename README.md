@@ -1,6 +1,6 @@
 # ⚡ BlitzView <img src="./doc/BlitzView.png" alt="BlitzView Logo" height="56" style="height:3.5em; width:auto;" align="right">
 
-[![CI](https://github.com/blitzview-org/blitzview/actions/workflows/ci.yml/badge.svg)](https://github.com/blitzview-org/blitzview/actions/workflows/ci.yml)
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 A directory oriented fast image and video browser.
@@ -17,7 +17,7 @@ is nothing to import and nothing to keep in sync.
 ## Download
 
 To get a first impression, try the
-[portable builds for Linux and Windows](https://github.com/blitzview-org/blitzview/releases/tag/latest-dev)
+[portable builds for Linux, Windows and macOS](../../releases/tag/latest-dev)
 — unzip and run, nothing is installed. These are snapshots of the latest
 development commit; there are no version-tagged releases or distribution
 packages yet.
@@ -55,10 +55,11 @@ cmake -B build/release -DCMAKE_BUILD_TYPE=Release && cmake --build build/release
 ```
 
 See the `Makefile` for the other targets — `make build` for a Debug build in
-`build/debug`, and
-`make linux-portable` / `make windows-portable` for the self-contained portable
-packages. The portable targets cross-build inside a container and therefore
-need **podman** plus a one-time `make build-image`.
+`build/debug`, and `make linux-portable` / `make windows-portable` /
+`make macos-portable` for the self-contained portable packages. The
+Linux/Windows targets cross-build inside a container and therefore need
+**podman** plus a one-time `make build-image`; the macOS target instead
+requires running natively on a Mac.
 
 Runtime dependency (optional): `exiftool` for capture time and tags. Without
 it, BlitzView runs normally and only the metadata features are unavailable.

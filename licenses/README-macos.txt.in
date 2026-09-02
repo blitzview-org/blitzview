@@ -1,0 +1,40 @@
+BlitzView Portable — Licenses & Source
+
+BlitzView is an open-source Qt6 media browser.
+Copyright © 2026 Oliver Schmidt
+
+This README describes the licenses for the software bundled in this
+portable application. The full license texts are provided in the
+subdirectories of this folder, one directory per bundled component.
+
+BlitzView itself is free software, licensed under the GNU General
+Public License version 3 (GPL-3.0-or-later). See BlitzView/GPL-3.0.txt.
+Source code: https://github.com/blitzview-org/blitzview (project page: https://blitzview.org)
+
+This portable build also bundles the following third-party components,
+each under its own license (see the corresponding subdirectory for the
+full text):
+
+  Qt @QT_VERSION@ — GNU LGPL version 3          Qt/LGPL-3.0.txt
+                     (the LGPLv3 incorporates the GPLv3 — its text is in
+                      BlitzView/GPL-3.0.txt)
+                     Source: https://download.qt.io/archive/qt/@QT_SERIES@/@QT_VERSION@/submodules/
+  FFmpeg          — GNU LGPL version 2.1        FFmpeg/LGPL-2.1.txt
+                     Bundled with the Qt binaries above, so the source is
+                     part of the Qt source archive. Upstream:
+                     https://ffmpeg.org/
+                     Libraries in this package:
+                     @FFMPEG_LIBS@
+
+The Qt libraries and image-format plugins additionally contain code from
+third-party projects (libjpeg-turbo, libpng, libtiff, libwebp, FreeType,
+HarfBuzz, PCRE2, zlib, BLAKE2, md4c). Their licenses require their own
+copyright notices to be reproduced: see Qt/THIRD-PARTY.txt.
+
+In accordance with the GNU GPL and LGPL, the corresponding source
+code for the GPL- and LGPL-licensed components is available from the
+upstream locations listed above.
+
+This document and the accompanying software (binaries and source
+code) are provided WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

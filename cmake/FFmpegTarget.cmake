@@ -3,12 +3,17 @@
 #
 # Dev builds (Linux): pkg-config finds the system FFmpeg. No variables needed.
 #
-# Portable builds (Linux + Windows): Qt 6.8 ships its own FFmpeg .so/.dll
-# (avcodec-61, avformat-61, avutil-59, swscale-8, swresample-5 = FFmpeg 7.x),
-# but provides no headers. The build sets:
-#   FFMPEG_INCLUDE_DIR — upstream FFmpeg 7.x headers (from /opt/ffmpeg/include)
-#   FFMPEG_LIB_DIR     — Qt's bundled .so/.dll directory
+# Portable builds (Linux + Windows + macOS): Qt 6.8 ships its own FFmpeg
+# .so/.dll/.dylib (avcodec-61, avformat-61, avutil-59, swscale-8,
+# swresample-5 = FFmpeg 7.x), but provides no headers. The build sets:
+#   FFMPEG_INCLUDE_DIR — upstream FFmpeg 7.x headers (see docker/deps.sh,
+#                        macbuild/fetch-ffmpeg-headers.sh)
+#   FFMPEG_LIB_DIR     — Qt's bundled .so/.dll/.dylib directory
 # This keeps exactly one FFmpeg in the package, matching Qt Multimedia.
+#
+# The non-Windows portable branch below (find_library with plain NAMES) is
+# shared by Linux and macOS: find_library appends the platform's native
+# prefix/suffix (lib*.so on Linux, lib*.dylib on macOS) automatically.
 
 add_library(bv_ffmpeg INTERFACE)
 

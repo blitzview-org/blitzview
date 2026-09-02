@@ -25,7 +25,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # One artifact per platform (see build-portable.yml). merge-multiple
-      # unpacks both into the same directory, restoring linux/ and windows/.
+      # unpacks all of them into the same directory, restoring linux/,
+      # windows/ and macos/.
       - uses: actions/download-artifact@v4
         with:
           pattern: portable-*
@@ -36,5 +37,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" linux/*.tar.gz windows/*.zip \
+          gh release create "${{ github.ref_name }}" linux/*.tar.gz windows/*.zip macos/*.zip \
             --title "${{ github.ref_name }}"

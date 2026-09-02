@@ -24,7 +24,8 @@ identity = $(shell cat $(1)/generated/identity.txt 2>/dev/null || echo Unknown)
         build-image build-image-force \
         windows windows-deploy windows-portable windows-clean \
         linux linux-deploy linux-portable linux-clean \
-        dist-linux dist-windows
+        macos macos-deploy macos-portable macos-clean \
+        dist-linux dist-windows dist-macos
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "} {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -158,3 +159,66 @@ linux-clean: ## Remove ./build/linux and ./dist/linux
 
 dist-linux: linux-portable ## Alias for linux-portable
 dist-windows: windows-portable ## Alias for windows-portable
+
+# ---------------------------------------------------------------------------
+# macOS build (native, see macbuild/).
+#
+# Unlike windows/linux this does NOT go through $(PODMAN)/$(BUILD_IMAGE): a
+# macOS SDK cannot run inside the AlmaLinux builder image, so this requires
+# an actual macOS host with Xcode and an aqtinstall-provided Qt "macos" kit
+# (point QT_MACOS_PREFIX at it, e.g. via local.properties). BuildInfo.h uses
+# the normal native GenerateBuildInfo CMake target -- git is available
+# directly here, unlike inside the Windows/Linux builder container.
+# ---------------------------------------------------------------------------
+MACOS_TYPE      ?= Release
+MACOS_DIR       := build/macos
+MACOS_DIST      := dist/macos
+QT_MACOS_PREFIX ?=
+
+macos: $(MACOS_DIR)/BlitzView.icns ## Build BlitzView.app into ./build/macos (native macOS host; set QT_MACOS_PREFIX)
+	@BUILD_DIR=$(CURDIR)/$(MACOS_DIR) BUILD_TYPE=$(MACOS_TYPE) QT_MACOS_PREFIX=$(QT_MACOS_PREFIX) \
+	    sh macbuild/build.sh
+
+# Must be named BlitzView.icns, not e.g. icon.icns: CMake's MACOSX_PACKAGE_LOCATION
+# copies a bundle resource under its own source basename, regardless of what
+# MACOSX_BUNDLE_ICON_FILE in CMakeLists.txt says -- the two names must match
+# or Finder silently shows no icon (found the hard way: the app ran fine, but
+# had no dock/Finder icon because the bundle contained the file as icon.icns
+# while Info.plist's CFBundleIconFile said BlitzView.icns).
+$(MACOS_DIR)/BlitzView.icns: res/BlitzViewIcon-macos.png | $(MACOS_DIR)
+	@if command -v iconutil >/dev/null 2>&1 && command -v sips >/dev/null 2>&1; then \
+	    rm -rf $(MACOS_DIR)/icon.iconset; \
+	    mkdir -p $(MACOS_DIR)/icon.iconset; \
+	    for size in 16 32 128 256 512; do \
+	        sips -z $$size $$size $< --out $(MACOS_DIR)/icon.iconset/icon_$${size}x$${size}.png >/dev/null; \
+	        double=$$((size * 2)); \
+	        sips -z $$double $$double $< --out $(MACOS_DIR)/icon.iconset/icon_$${size}x$${size}@2x.png >/dev/null; \
+	    done; \
+	    iconutil -c icns $(MACOS_DIR)/icon.iconset -o $@; \
+	    rm -rf $(MACOS_DIR)/icon.iconset; \
+	else \
+	    echo "iconutil/sips not found - app bundle will have no icon"; \
+	fi
+
+$(MACOS_DIR):
+	@mkdir -p $(MACOS_DIR)
+
+macos-deploy: macos ## Bundle Qt frameworks + FFmpeg dylibs + licenses into build/macos/BlitzView/
+	@BUILD_DIR=$(CURDIR)/$(MACOS_DIR) QT_MACOS_PREFIX=$(QT_MACOS_PREFIX) \
+	    sh macbuild/deploy.sh
+
+# Same two-level idea as Windows/Linux: BlitzView/ contains BlitzView.app
+# (the clickable entry point) and licenses/ side by side, so both are visible
+# right after unzipping without opening the bundle.
+macos-portable: macos-deploy ## Zip the BlitzView/ portable directory into dist/macos/
+	@mkdir -p $(MACOS_DIST)
+	@rm -f $(MACOS_DIST)/BlitzView-macOS-$(call identity,$(MACOS_DIR)).zip
+	@mv $(MACOS_DIR)/BlitzView $(MACOS_DIR)/BlitzView-$(call identity,$(MACOS_DIR))
+	cd $(MACOS_DIR) && zip -q -r -y $(CURDIR)/$(MACOS_DIST)/BlitzView-macOS-$(call identity,$(MACOS_DIR)).zip BlitzView-$(call identity,$(MACOS_DIR))
+	@mv $(MACOS_DIR)/BlitzView-$(call identity,$(MACOS_DIR)) $(MACOS_DIR)/BlitzView
+	@ls -lh $(MACOS_DIST)/BlitzView-macOS-$(call identity,$(MACOS_DIR)).zip
+
+macos-clean: ## Remove ./build/macos and ./dist/macos
+	rm -rf $(MACOS_DIR) $(MACOS_DIST)
+
+dist-macos: macos-portable ## Alias for macos-portable

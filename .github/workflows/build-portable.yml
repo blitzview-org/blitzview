@@ -1,19 +1,27 @@
 name: Build portable apps
 
-# Reusable workflow: builds the Linux and Windows portable packages via the
-# combined AlmaLinux 8 builder image (see docker/, Makefile) and smoke-tests
-# them. Called by ci.yml (every push to master) and release.yml (version tags).
+# Reusable workflow: builds the Linux, Windows and macOS portable packages and
+# smoke-tests them. Called by ci.yml (every push to master) and release.yml
+# (version tags).
 #
-# The two platforms run as separate matrix jobs. That is not just concurrency:
-# each job gets its own runner, so the two builds no longer share one runner's
-# four cores. Both jobs pull the SAME image -- a Windows-only image could not be
-# meaningfully smaller, because the cross-build needs the Linux Qt as
-# QT_HOST_PATH (winbuild/build.sh) on top of MinGW, Wine and the Windows Qt.
+# Linux and Windows share the combined AlmaLinux 8 builder image (see
+# docker/, Makefile) and run as a matrix on ubuntu-latest. macOS is a
+# separate job (`build-macos`, below): there is no cross-compile path for
+# macOS the way MinGW covers Windows, so it runs natively on a macos-14
+# runner instead, entirely outside the Docker/Podman machinery.
 #
-# Each job uploads its own artifact ("portable-linux" / "portable-windows"),
-# with dist/ as the artifact root so the platform subdirectory is preserved.
-# The publishing jobs merge them back with `pattern: portable-*` +
-# `merge-multiple: true`, which restores the layout their release globs expect.
+# The Linux/Windows platforms run as separate matrix jobs. That is not just
+# concurrency: each job gets its own runner, so the two builds no longer
+# share one runner's four cores. Both jobs pull the SAME image -- a
+# Windows-only image could not be meaningfully smaller, because the
+# cross-build needs the Linux Qt as QT_HOST_PATH (winbuild/build.sh) on top
+# of MinGW, Wine and the Windows Qt.
+#
+# Every job uploads its own artifact ("portable-linux" / "portable-windows" /
+# "portable-macos"), with dist/ as the artifact root so the platform
+# subdirectory is preserved. The publishing jobs merge them back with
+# `pattern: portable-*` + `merge-multiple: true`, which restores the layout
+# their release globs expect.
 on:
   workflow_call:
 
@@ -67,12 +75,22 @@ jobs:
           key=$(cat docker/Dockerfile docker/deps.env docker/deps.sh docker/importlibs.sh | sha256sum | cut -c1-12)
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
+      # Derived from github.repository (owner/repo), not hardcoded to the
+      # blitzview-org GitHub App installation -- so this workflow also works
+      # unmodified in a fork or a private test repo under a different owner.
+      # GHCR image paths must be all-lowercase; github.repository preserves
+      # the account's display casing, so it is lowercased here.
+      - name: Compute builder image repository
+        id: image
+        run: echo "repo=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-build" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Pull or build the builder image
         env:
-          IMG: ghcr.io/blitzview-org/blitzview-build:${{ steps.key.outputs.key }}
+          IMG: ${{ steps.image.outputs.repo }}:${{ steps.key.outputs.key }}
+          LATEST: ${{ steps.image.outputs.repo }}:latest
         run: |
           if docker pull "$IMG"; then
             docker tag "$IMG" blitzview-build
@@ -81,8 +99,8 @@ jobs:
             make build-image-force PODMAN=docker BUILD_IMAGE=blitzview-build
             docker tag blitzview-build "$IMG"
             docker push "$IMG"
-            docker tag blitzview-build ghcr.io/blitzview-org/blitzview-build:latest
-            docker push ghcr.io/blitzview-org/blitzview-build:latest
+            docker tag blitzview-build "$LATEST"
+            docker push "$LATEST"
           fi
 
       - name: Build portable package
@@ -98,5 +116,70 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: portable-${{ matrix.platform }}
+          path: dist
+          retention-days: 14
+
+  # Native macOS build -- no builder image, no Docker/Podman. See macbuild/
+  # for the scripts this drives.
+  build-macos:
+    runs-on: macos-14
+    name: build (macos)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags: git describe needs both
+
+      - name: Read pinned Qt version
+        id: qt
+        run: |
+          . docker/deps.env
+          echo "version=$QT_VERSION" >> "$GITHUB_OUTPUT"
+
+      # aqtinstall's mac desktop kit is already a universal2 (x86_64 + arm64)
+      # binary distribution, so one Qt download covers both target CPUs --
+      # see macbuild/build.sh for the CMAKE_OSX_ARCHITECTURES build.
+      - name: Cache Qt (aqtinstall)
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: qt
+          key: qt-macos-${{ steps.qt.outputs.version }}-${{ hashFiles('docker/deps.env') }}
+
+      # macos-14's system Python is externally managed (PEP 668) -- a plain
+      # `pip install` is blocked. pipx (preinstalled on GitHub's macOS
+      # runners) installs aqtinstall into its own venv and puts `aqt` on
+      # PATH, sidestepping that restriction without needing --break-system-packages.
+      - name: Install Qt (aqtinstall)
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          pipx install aqtinstall==3.3.0
+          aqt install-qt mac desktop "${{ steps.qt.outputs.version }}" clang_64 \
+              -m qtmultimedia qtimageformats -O qt
+
+      - name: Cache FFmpeg headers
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: build/macos/ffmpeg-include
+          key: ffmpeg-headers-macos-${{ hashFiles('docker/deps.env') }}
+
+      - name: Fetch FFmpeg headers
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: macbuild/fetch-ffmpeg-headers.sh build/macos/ffmpeg-include
+
+      - name: Build portable package
+        env:
+          QT_MACOS_PREFIX: ${{ github.workspace }}/qt/${{ steps.qt.outputs.version }}/macos
+          FFMPEG_INCLUDE_DIR: ${{ github.workspace }}/build/macos/ffmpeg-include
+        run: make macos-portable
+
+      - name: Smoke test
+        run: macbuild/smoke-test.sh build/macos/BlitzView
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-macos
           path: dist
           retention-days: 14

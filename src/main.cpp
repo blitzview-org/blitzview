@@ -77,7 +77,16 @@ int main(int argc, char* argv[])
     av_log_set_level(AV_LOG_QUIET);
     app.setApplicationName("BlitzView");
     app.setOrganizationName("BlitzView");
+#ifndef Q_OS_MACOS
+    // On macOS, QApplication::setWindowIcon() does not just set a per-window
+    // icon -- Qt's Cocoa platform plugin forwards it to
+    // NSApplication.applicationIconImage, which overrides the Dock/Cmd+Tab
+    // icon at runtime and hides the app bundle's own Info.plist icon
+    // (CFBundleIconFile, see CMakeLists.txt's if(APPLE) block). Skipping this
+    // call there lets the bundle's BlitzView.icns show through undisturbed,
+    // same as every other properly bundled macOS app.
     app.setWindowIcon(QIcon(QStringLiteral(":/BlitzViewIcon.png")));
+#endif
 
     AppSettings::rememberSystemDoubleClickInterval(QApplication::doubleClickInterval());
     if (const int ms = AppSettings::doubleClickIntervalMs(); ms > 0)
