@@ -10,6 +10,7 @@
 #   - Wine 6.0.2 (EPEL) — runs Windows Qt tools: windeployqt, moc, uic, rcc
 #   - Qt 6.8.3 for BOTH platforms (Linux native + Windows target)
 #   - FFmpeg 7.1.1 headers (matching Qt's bundled FFmpeg)
+#   - kimageformats plugins for both platforms (XCF, PSD, TGA, QOI, ...)
 #   - CMake >= 3.28 (via pip — needed for CMAKE_CROSSCOMPILING_EMULATOR)
 #   - Xvfb for headless smoke testing
 #
@@ -50,7 +51,16 @@ RUN dnf install -y epel-release && \
 RUN wineboot --init 2>/dev/null; wineserver --wait 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 3. aqtinstall — download Qt for both platforms
+# 3. CMake >= 3.28 + Ninja via pip (distro CMake 3.26 is insufficient for
+#    cross+emulator). Installed BEFORE deps.sh, which uses cmake to build
+#    kimageformats.
+# ---------------------------------------------------------------------------
+RUN python3.9 -m pip install --no-cache-dir cmake==3.31.4 ninja && \
+    cmake --version | head -1 && \
+    ninja --version
+
+# ---------------------------------------------------------------------------
+# 4. aqtinstall — download Qt for both platforms, then build kimageformats
 # ---------------------------------------------------------------------------
 RUN python3.9 -m pip install --no-cache-dir aqtinstall==3.3.0
 
@@ -63,17 +73,10 @@ ENV QT_VERSION=6.8.3 \
     PATH=/opt/mingw/bin:$PATH
 
 # ---------------------------------------------------------------------------
-# 4. Import libraries for FFmpeg DLLs (Windows link step)
+# 5. Import libraries for FFmpeg DLLs (Windows link step)
 # ---------------------------------------------------------------------------
 COPY docker/importlibs.sh /usr/src/importlibs.sh
 RUN sh /usr/src/importlibs.sh
-
-# ---------------------------------------------------------------------------
-# 5. CMake >= 3.28 via pip (Distro CMake 3.26 is insufficient for cross+emulator)
-# ---------------------------------------------------------------------------
-RUN python3.9 -m pip install --no-cache-dir cmake==3.31.4 ninja && \
-    cmake --version | head -1 && \
-    ninja --version
 
 # ---------------------------------------------------------------------------
 # Deliberately NOT in this image: the build/deploy scripts (winbuild/,

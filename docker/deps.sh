@@ -82,6 +82,136 @@ echo "--- FFmpeg headers at /opt/ffmpeg/include:"
 ls /opt/ffmpeg/include/
 
 # ---------------------------------------------------------------------------
+# kimageformats — extra image format plugins (XCF, PSD, TGA, QOI, DDS, ...).
+#
+# Built for BOTH Qt prefixes and installed INTO them, so the deploy scripts
+# pick the plugins up through the existing "copy everything in
+# plugins/imageformats" step -- no separate deployment path.
+#
+# Only the plugins that need nothing but Qt are wanted. That is not achieved
+# by listing them, but by denying the optional dependencies: kimageformats
+# builds avif/exr/raw/ora/kra/jp2 whenever it happens to FIND libavif,
+# OpenEXR, LibRaw, KF6Archive or OpenJPEG. Relying on "they are not installed
+# in this image" would make the output depend on the environment -- and the
+# macOS build runs on a host where Homebrew may well have them, single-arch,
+# which would break the universal2 build. CMAKE_DISABLE_FIND_PACKAGE_* makes
+# the outcome deterministic instead. Keep this list in sync with macbuild.
+#
+# The three plugins with an option() default of ON are set explicitly for the
+# same reason. DDS stays on: it needs nothing but Qt.
+# ---------------------------------------------------------------------------
+KF_COMMON_OPTS="-DBUILD_TESTING=OFF
+    -DKIMAGEFORMATS_DDS=ON
+    -DKIMAGEFORMATS_JXL=OFF
+    -DKIMAGEFORMATS_JXR=OFF
+    -DKIMAGEFORMATS_HEIF=OFF
+    -DCMAKE_DISABLE_FIND_PACKAGE_libavif=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_OpenEXR=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_LibRaw=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_KF6Archive=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_OpenJPEG=ON"
+
+# Same compiler the Linux build uses (AlmaLinux 8's stock GCC 8 is too old,
+# and it is not on PATH by default). ECM's docs subdirectory calls
+# enable_language(CXX), so even ECM needs a working compiler here.
+. /opt/rh/gcc-toolset-12/enable
+
+cd /tmp
+curl -L -o ecm-src.tar.xz "$ECM_SRC_URL"
+echo "$ECM_SRC_SHA256  ecm-src.tar.xz" | sha256sum -c -
+tar xJf ecm-src.tar.xz
+
+curl -L -o kimageformats-src.tar.xz "$KIMAGEFORMATS_SRC_URL"
+echo "$KIMAGEFORMATS_SRC_SHA256  kimageformats-src.tar.xz" | sha256sum -c -
+tar xJf kimageformats-src.tar.xz
+
+# ECM is pure CMake modules -- nothing is compiled, it only has to be found.
+# The doc targets need Sphinx and fail the install without it; they are off.
+cmake -S "/tmp/extra-cmake-modules-$KF_VERSION" -B /tmp/b-ecm -G Ninja -Wno-dev \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DBUILD_TESTING=OFF \
+    -DBUILD_HTML_DOCS=OFF -DBUILD_MAN_DOCS=OFF -DBUILD_QTHELP_DOCS=OFF
+cmake --build /tmp/b-ecm --target install
+
+# Linux (native).
+# shellcheck disable=SC2086  # KF_COMMON_OPTS is a deliberate word list
+cmake -S "/tmp/kimageformats-$KF_VERSION" -B /tmp/b-kif-linux -G Ninja -Wno-dev \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$QT_LINUX_PREFIX" \
+    -DCMAKE_PREFIX_PATH="$QT_LINUX_PREFIX" \
+    $KF_COMMON_OPTS
+cmake --build /tmp/b-kif-linux --parallel
+cmake --install /tmp/b-kif-linux
+
+# Windows (MinGW cross). The project's own toolchain file lives in the
+# bind-mounted source tree, which does not exist at image build time -- see
+# the note at the end of the Dockerfile about the cache key. A minimal
+# equivalent is written here instead; it only has to serve Qt6Gui.
+cat > /tmp/toolchain-kif-mingw.cmake <<'EOF'
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER   /opt/mingw/bin/x86_64-w64-mingw32-gcc)
+set(CMAKE_CXX_COMPILER /opt/mingw/bin/x86_64-w64-mingw32-g++)
+set(CMAKE_RC_COMPILER  /opt/mingw/bin/x86_64-w64-mingw32-windres)
+set(CMAKE_CROSSCOMPILING_EMULATOR wine)
+set(CMAKE_FIND_ROOT_PATH /opt/mingw/x86_64-w64-mingw32)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+EOF
+
+# shellcheck disable=SC2086  # KF_COMMON_OPTS is a deliberate word list
+cmake -S "/tmp/kimageformats-$KF_VERSION" -B /tmp/b-kif-win -G Ninja -Wno-dev \
+    -DCMAKE_TOOLCHAIN_FILE=/tmp/toolchain-kif-mingw.cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$QT_WINDOWS_PREFIX" \
+    -DCMAKE_PREFIX_PATH="$QT_WINDOWS_PREFIX" \
+    -DQT_HOST_PATH="$QT_LINUX_PREFIX" \
+    -DECM_DIR=/usr/share/ECM/cmake \
+    $KF_COMMON_OPTS
+cmake --build /tmp/b-kif-win --parallel
+cmake --install /tmp/b-kif-win
+
+# ECM derives the plugin install dir per target platform: the native build
+# lands in <prefix>/plugins, the MinGW one in <prefix>/lib/plugins -- which is
+# neither where Qt looks nor where the deploy scripts read from. Pinning
+# KDE_INSTALL_PLUGINDIR does not reach the MinGW build, so the location is
+# normalised here instead. Written to cover both prefixes so a future ECM
+# change in either direction cannot silently misplace the plugins.
+for prefix in "$QT_LINUX_PREFIX" "$QT_WINDOWS_PREFIX"; do
+    stray="$prefix/lib/plugins/imageformats"
+    if [ -d "$stray" ]; then
+        mkdir -p "$prefix/plugins/imageformats"
+        mv "$stray"/kimg_* "$prefix/plugins/imageformats/"
+        rm -rf "$prefix/lib/plugins"
+    fi
+done
+
+rm -rf /tmp/ecm-src.tar.xz /tmp/kimageformats-src.tar.xz \
+       "/tmp/extra-cmake-modules-$KF_VERSION" "/tmp/kimageformats-$KF_VERSION" \
+       /tmp/b-ecm /tmp/b-kif-linux /tmp/b-kif-win
+
+# Guard: every plugin must depend on Qt and the CRT only. A hit here means an
+# optional codec dependency was found after all and the deny list above needs
+# extending -- catching that at image build time rather than in a user's
+# portable package is the whole point.
+echo "--- kimageformats plugins (Linux):"
+for so in "$QT_LINUX_PREFIX/plugins/imageformats/"kimg_*.so; do
+    [ -e "$so" ] || { echo "ERROR: no kimageformats plugins installed" >&2; exit 1; }
+    if ldd "$so" | grep -qE 'libavif|libheif|libjxl|libraw|OpenEXR|Imath|libopenjp2|KF6Archive'; then
+        echo "ERROR: $so pulled in an optional codec dependency:" >&2
+        ldd "$so" >&2
+        exit 1
+    fi
+    echo "  $(basename "$so")"
+done
+
+echo "--- kimageformats plugins (Windows):"
+ls "$QT_WINDOWS_PREFIX/plugins/imageformats/" | grep '^kimg_' || \
+    { echo "ERROR: no Windows kimageformats plugins installed" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
 # Report: Qt's bundled FFmpeg .so files (what we link against).
 # ---------------------------------------------------------------------------
 echo "--- Linux Qt bundled FFmpeg libraries:"

@@ -3,6 +3,7 @@
 #include "ThumbnailDiskCache.h"
 #include "ExifThumbExtractor.h"
 #include "FfmpegThumbExtractor.h"
+#include "PageBackground.h"
 #include "SlideTrace.h"
 
 #include <QImage>
@@ -323,6 +324,7 @@ private:
     {
         QImageReader reader(path);
         reader.setAutoTransform(true);
+        applyPaperBackground(reader, QFileInfo(path).suffix().toLower());
 
         const QSize srcSize = reader.size();
         if (srcSize.isValid() && srcSize.width() > 0 && srcSize.height() > 0) {

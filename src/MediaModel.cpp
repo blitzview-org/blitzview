@@ -21,6 +21,7 @@
 #include <QSet>
 #include <QUrl>
 #include <QImage>
+#include <QImageReader>
 #include <QRunnable>
 #include <QThread>
 #include <algorithm>
@@ -28,12 +29,34 @@
 #include <QtConcurrentRun>
 #include <QElapsedTimer>
 
-static const QStringList IMAGE_EXT = {
-    "jpg","jpeg","png","gif","bmp","webp","tiff","tif","svg"
-};
-static const QStringList VIDEO_EXT = {
+static const QSet<QString> VIDEO_EXT = {
     "mp4","mkv","avi","mov","webm"
 };
+
+// Recognised image extensions are whatever the Qt image plugins present at
+// runtime can actually decode -- QImageReader is asked instead of a list being
+// maintained here. Installing more plugins (kimageformats and friends) widens
+// the coverage without a rebuild; a system without them degrades silently to
+// Qt's built-in formats.
+//
+// supportedImageFormats() returns format identifiers, not the full set of
+// spellings a file may carry, so a few common suffix aliases are added.
+//
+// Initialised on first use rather than at namespace scope: the plugin lookup
+// needs a live QCoreApplication for its plugin paths. Function-local statics
+// are thread-safe, and the scan runs on a worker thread.
+static const QSet<QString>& imageExtensions()
+{
+    static const QSet<QString> exts = [] {
+        QSet<QString> s;
+        const QList<QByteArray> formats = QImageReader::supportedImageFormats();
+        for (const QByteArray& f : formats)
+            s.insert(QString::fromLatin1(f).toLower());
+        s += QSet<QString>{ "jpe", "jfi" };
+        return s;
+    }();
+    return exts;
+}
 
 static QString formatSize(qint64 bytes)
 {
@@ -449,8 +472,8 @@ void MediaModel::loadDirectories(const QStringList& paths, bool recursive)
                     }
                     QString ext = fi.suffix().toLower();
 
-                    bool isImage = IMAGE_EXT.contains(ext);
                     bool isVideo = VIDEO_EXT.contains(ext);
+                    bool isImage = !isVideo && imageExtensions().contains(ext);
                     if (!isImage && !isVideo)
                         continue;
 
@@ -554,7 +577,8 @@ void MediaModel::loadDirectories(const QStringList& recursive, const QStringList
                         continue;
                     }
                     QString ext = fi.suffix().toLower();
-                    if (!IMAGE_EXT.contains(ext) && !VIDEO_EXT.contains(ext))
+                    const bool isVideo = VIDEO_EXT.contains(ext);
+                    if (!isVideo && !imageExtensions().contains(ext))
                         continue;
                     QString absPath = fi.absoluteFilePath();
                     if (seen.contains(absPath)) continue;
@@ -566,7 +590,7 @@ void MediaModel::loadDirectories(const QStringList& recursive, const QStringList
                     item.modifiedDate = fi.lastModified();
                     item.createdDate  = fi.birthTime();
                     item.fileType     = ext;
-                    item.isVideo      = VIDEO_EXT.contains(ext);
+                    item.isVideo      = isVideo;
                     result.items.append(item);
                 }
             };

@@ -22,10 +22,25 @@ if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
     echo "licenses/README.txt still contains template placeholders"; exit 1
 fi
 for f in BlitzView/GPL-3.0.txt Qt/LGPL-3.0.txt Qt/THIRD-PARTY.txt FFmpeg/LGPL-2.1.txt \
-         ICU/LICENSE xorg/COPYING libxkbcommon/LICENSE; do
+         ICU/LICENSE xorg/COPYING libxkbcommon/LICENSE \
+         kimageformats/LGPL-2.0-or-later.txt; do
     [ -s "$PORTABLE_DIR/licenses/$f" ] || { echo "MISSING licenses/$f"; exit 1; }
 done
 echo "licenses OK"
+
+# The extra image formats (XCF, PSD, TGA, QOI, ...) come from kimageformats
+# plugins bundled next to Qt's own. On a development machine the same formats
+# usually work through a system-wide kimageformats, so only checking the
+# PACKAGE can prove the bundling -- a missing plugin here is invisible locally
+# and shows up as "BlitzView cannot open my .xcf" on a user's machine.
+echo "--- checking bundled image format plugins"
+for plug in kimg_xcf.so kimg_psd.so kimg_tga.so kimg_qoi.so; do
+    [ -f "$PORTABLE_DIR/app/imageformats/$plug" ] || { echo "MISSING imageformats/$plug"; exit 1; }
+    unresolved=$(LD_LIBRARY_PATH="$PORTABLE_DIR/app/lib" ldd "$PORTABLE_DIR/app/imageformats/$plug" \
+                 | sed -n 's/^\s*\(.*\) => not found$/\1/p')
+    [ -z "$unresolved" ] || { echo "$plug has unresolved libraries:"; echo "$unresolved" | sed 's/^/  /'; exit 1; }
+done
+echo "image format plugins OK"
 
 # Resolve the dynamic linking the way the launcher does, and report EVERY
 # unresolved library at once. Without this, a missing system library shows up

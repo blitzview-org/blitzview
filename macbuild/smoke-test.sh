@@ -27,10 +27,28 @@ echo "--- checking bundled licenses"
 if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
     echo "licenses/README.txt still contains template placeholders"; exit 1
 fi
-for f in BlitzView/GPL-3.0.txt Qt/LGPL-3.0.txt Qt/THIRD-PARTY.txt FFmpeg/LGPL-2.1.txt; do
+for f in BlitzView/GPL-3.0.txt Qt/LGPL-3.0.txt Qt/THIRD-PARTY.txt FFmpeg/LGPL-2.1.txt \
+         kimageformats/LGPL-2.0-or-later.txt; do
     [ -s "$PORTABLE_DIR/licenses/$f" ] || { echo "MISSING licenses/$f"; exit 1; }
 done
 echo "licenses OK"
+
+# The extra image formats (XCF, PSD, TGA, QOI, ...) come from kimageformats
+# plugins built in build.sh. Only checking the PACKAGE proves they were
+# deployed, and lipo proves each one carries both CPU slices -- a plugin that
+# lost its arm64 half would fail on exactly the machines this build targets.
+echo "--- checking bundled image format plugins"
+for plug in kimg_xcf kimg_psd kimg_tga kimg_qoi; do
+    path="$APP/Contents/PlugIns/imageformats/$plug.dylib"
+    [ -f "$path" ] || path="$APP/Contents/PlugIns/imageformats/$plug.so"
+    [ -f "$path" ] || { echo "MISSING PlugIns/imageformats/$plug"; exit 1; }
+    archs=$(lipo -archs "$path")
+    case " $archs " in
+        *' x86_64 '*) case " $archs " in *' arm64 '*) : ;; *) false ;; esac ;;
+        *) false ;;
+    esac || { echo "$plug is not universal2 ($archs)"; exit 1; }
+done
+echo "image format plugins OK"
 
 echo "--- smoke test: $EXE"
 "$EXE" &

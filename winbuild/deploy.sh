@@ -62,6 +62,28 @@ for dll in "$QT_PREFIX_WIN/bin/avcodec"-*.dll \
     [ -f "$DEPLOY_DIR/$(basename "$dll")" ] || cp "$dll" "$DEPLOY_DIR/"
 done
 
+# kimageformats plugins (XCF, PSD, TGA, QOI, ...). windeployqt does pick these
+# up in practice, because the builder image installs them into the same
+# imageformats directory it deploys from -- but that is incidental, not a
+# documented guarantee, and a package silently missing them reads fewer formats
+# than the Linux one. Copy whatever is not already there and fail loudly if
+# there is nothing to copy, which is what actually catches a builder image
+# built without kimageformats.
+KIMG_SRC="$QT_PREFIX_WIN/plugins/imageformats"
+mkdir -p "$DEPLOY_DIR/imageformats"
+kimg_count=0
+for dll in "$KIMG_SRC"/kimg_*.dll; do
+    [ -f "$dll" ] || continue
+    cp "$dll" "$DEPLOY_DIR/imageformats/"
+    kimg_count=$((kimg_count + 1))
+done
+[ "$kimg_count" -gt 0 ] || {
+    echo "ERROR: no kimg_*.dll in $KIMG_SRC -- the builder image did not build" >&2
+    echo "       kimageformats, see docker/deps.sh" >&2
+    exit 1
+}
+echo "--- kimageformats plugins bundled: $kimg_count"
+
 # ---------------------------------------------------------------------------
 # License texts — ship the component licenses plus a platform-specific README
 # with the source-offer / upstream links. ONLY the components that exist on
@@ -87,6 +109,7 @@ FFMPEG_LIBS=$(ls "$DEPLOY_DIR"/av*.dll "$DEPLOY_DIR"/sw*.dll 2>/dev/null |
 sed -e "s/@QT_VERSION@/$QT_VERSION/g" \
     -e "s/@QT_SERIES@/$QT_SERIES/g" \
     -e "s/@FFMPEG_LIBS@/$FFMPEG_LIBS/g" \
+    -e "s/@KF_VERSION@/$KF_VERSION/g" \
     "$PROJECT/licenses/README-windows.txt.in" > "$PORTABLE_DIR/licenses/README.txt"
 if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
     echo "ERROR: unsubstituted placeholder in licenses/README.txt" >&2
@@ -95,7 +118,7 @@ if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
 fi
 
 # No ICU here: the MinGW Qt build does not bundle it (unlike the Linux one).
-for sub in BlitzView Qt FFmpeg mingw-runtime; do
+for sub in BlitzView Qt FFmpeg kimageformats mingw-runtime; do
     if [ ! -d "$PROJECT/licenses/$sub" ]; then
         echo "ERROR: licenses/$sub is missing -- the package must not ship without it" >&2
         exit 1

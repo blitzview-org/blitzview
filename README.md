@@ -30,16 +30,17 @@ packages yet.
 - **Directory tree** with recursive or individual selection of any number of
   folders, plus automatic detection of USB drives and other removable media.
 - **Fullscreen viewer** for images and videos, with zoom and pan.
-- **Metadata** (optional, via `exiftool`): capture time, and user tags you can
-  edit, assign, and filter by.
-- **Video thumbnails** extracted with FFmpeg.
+- **Metadata** (optional, via [ExifTool](https://exiftool.org/)): capture
+  time, and user tags you can edit, assign, and filter by.
+- **Video thumbnails** extracted with [FFmpeg](https://ffmpeg.org/).
 - Live sync: the view follows changes on disk while it is open.
 
 ## Building
 
-Requirements: **Qt 6** (Core, Gui, Widgets, Multimedia, MultimediaWidgets,
-OpenGLWidgets, Concurrent — plus DBus on Linux), **FFmpeg** development
-headers, **CMake ≥ 3.19**, and a C++17 compiler.
+Requirements: **[Qt 6](https://doc.qt.io/qt-6/)** (Core, Gui, Widgets, Multimedia,
+MultimediaWidgets, OpenGLWidgets, Concurrent — plus DBus on Linux),
+**[FFmpeg](https://ffmpeg.org/)** development headers,
+**[CMake](https://cmake.org/) ≥ 3.19**, and a C++17 compiler.
 
 ```sh
 git clone https://github.com/blitzview-org/blitzview.git
@@ -58,11 +59,16 @@ See the `Makefile` for the other targets — `make build` for a Debug build in
 `build/debug`, and `make linux-portable` / `make windows-portable` /
 `make macos-portable` for the self-contained portable packages. The
 Linux/Windows targets cross-build inside a container and therefore need
-**podman** plus a one-time `make build-image`; the macOS target instead
-requires running natively on a Mac.
+**[podman](https://podman.io/)** plus a one-time `make build-image`; the macOS
+target instead requires running natively on a Mac.
 
-Runtime dependency (optional): `exiftool` for capture time and tags. Without
-it, BlitzView runs normally and only the metadata features are unavailable.
+Runtime dependencies (both optional):
+
+- [ExifTool](https://exiftool.org/) for capture time and tags. Without it,
+  BlitzView runs normally and only the metadata features are unavailable.
+- [KImageFormats](https://invent.kde.org/frameworks/kimageformats) for
+  additional image format plugins. The portable BlitzView packages already 
+  bundle the subset of those plugins that needs no extra codec libraries.
 
 ## License
 
@@ -79,5 +85,5 @@ PARTICULAR PURPOSE.
 
 BlitzView links dynamically against Qt (LGPL v3) and FFmpeg (LGPL v2.1). The
 license texts of every bundled third-party component, together with the
-corresponding source offers, are in [`licenses/`](licenses/) and ship inside
+corresponding source offers, are in [`./licenses/`](licenses/) and ship inside
 the portable packages.

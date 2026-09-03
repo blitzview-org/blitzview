@@ -25,6 +25,14 @@ full text):
                      https://ffmpeg.org/
                      Libraries in this package:
                      @FFMPEG_LIBS@
+  kimageformats @KF_VERSION@ — GNU LGPL, version 2.0 or later
+                     (individual plugins vary: LGPL-2.0-or-later,
+                      LGPL-2.1-or-later, or LGPL-2.1-only OR LGPL-3.0-only)
+                     kimageformats/LGPL-2.0-or-later.txt and the other
+                     texts in that directory
+                     Provides the image format plugins Qt itself does not
+                     ship (XCF, PSD, TGA, QOI, DDS, HDR, PCX, ...).
+                     Source: https://download.kde.org/stable/frameworks/
 
 The Qt libraries and image-format plugins additionally contain code from
 third-party projects (libjpeg-turbo, libpng, libtiff, libwebp, FreeType,

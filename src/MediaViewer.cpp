@@ -2,6 +2,7 @@
 
 #include "Shortcuts.h"
 #include "AppSettings.h"
+#include "PageBackground.h"
 
 #include <QApplication>
 #include <QAudioOutput>
@@ -560,6 +561,7 @@ void MediaViewer::loadCurrent()
 
         QImageReader reader(item.filePath);
         reader.setAutoTransform(true);
+        applyPaperBackground(reader, item.fileType);
         const QImage img = reader.read();
         if (img.isNull()) {
             m_original = QPixmap();

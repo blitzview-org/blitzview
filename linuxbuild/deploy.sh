@@ -179,10 +179,17 @@ for pat in "$QT_PREFIX/plugins/platforms/libqxcb.so" \
     [ -f "$pat" ] && cp "$pat" "$DEPLOY_DIR/platforms/"
 done
 
-# Image format plugins.
+# Image format plugins. This copies Qt's own plugins AND the kimageformats
+# ones (XCF, PSD, TGA, QOI, ...), which the builder image installs into the
+# same directory -- see docker/deps.sh.
 for f in "$QT_PREFIX/plugins/imageformats/"*.so; do
     [ -f "$f" ] && cp "$f" "$DEPLOY_DIR/imageformats/"
 done
+ls "$DEPLOY_DIR/imageformats/"kimg_*.so >/dev/null 2>&1 || {
+    echo "ERROR: no kimg_*.so bundled -- the builder image did not build" >&2
+    echo "       kimageformats, see docker/deps.sh" >&2
+    exit 1
+}
 
 # Multimedia plugins (FFmpeg decoder etc.).
 for f in "$QT_PREFIX/plugins/multimedia/"*.so; do
@@ -227,6 +234,7 @@ sed -e "s/@QT_VERSION@/$QT_VERSION/g" \
     -e "s/@QT_SERIES@/$QT_SERIES/g" \
     -e "s/@ICU_VERSION@/$ICU_VERSION/g" \
     -e "s/@FFMPEG_LIBS@/$FFMPEG_LIBS/g" \
+    -e "s/@KF_VERSION@/$KF_VERSION/g" \
     "$PROJECT/licenses/README-linux.txt.in" > "$PORTABLE_DIR/licenses/README.txt"
 if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
     echo "ERROR: unsubstituted placeholder in licenses/README.txt" >&2
@@ -234,7 +242,7 @@ if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
     exit 1
 fi
 
-for sub in BlitzView Qt ICU FFmpeg xorg libxkbcommon; do
+for sub in BlitzView Qt ICU FFmpeg kimageformats xorg libxkbcommon; do
     if [ ! -d "$PROJECT/licenses/$sub" ]; then
         echo "ERROR: licenses/$sub is missing -- the package must not ship without it" >&2
         exit 1

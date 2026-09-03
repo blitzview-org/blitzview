@@ -24,10 +24,20 @@ fi
 for f in BlitzView/GPL-3.0.txt Qt/LGPL-3.0.txt Qt/THIRD-PARTY.txt FFmpeg/LGPL-2.1.txt \
          mingw-runtime/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt \
          mingw-runtime/MINGW-W64-RUNTIME-COPYING.txt \
-         mingw-runtime/MIT-winpthreads.txt; do
+         mingw-runtime/MIT-winpthreads.txt \
+         kimageformats/LGPL-2.0-or-later.txt; do
     [ -s "$PORTABLE_DIR/licenses/$f" ] || { echo "MISSING licenses/$f"; exit 1; }
 done
 echo "licenses OK"
+
+# The extra image formats (XCF, PSD, TGA, QOI, ...) come from kimageformats
+# plugins. windeployqt does not know them, so they are copied explicitly in
+# deploy.sh -- and only checking the PACKAGE can prove that actually happened.
+echo "--- checking bundled image format plugins"
+for plug in kimg_xcf.dll kimg_psd.dll kimg_tga.dll kimg_qoi.dll; do
+    [ -f "$PORTABLE_DIR/app/imageformats/$plug" ] || { echo "MISSING imageformats/$plug"; exit 1; }
+done
+echo "image format plugins OK"
 
 OWN_XVFB=0
 if [ -z "${DISPLAY:-}" ]; then

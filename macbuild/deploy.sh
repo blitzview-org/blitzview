@@ -19,6 +19,10 @@ PROJECT=${PROJECT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 BUILD_DIR=${BUILD_DIR:-$PROJECT/build/macos}
 QT_MACOS_PREFIX=${QT_MACOS_PREFIX:?"set QT_MACOS_PREFIX to the aqtinstall Qt macOS prefix"}
 
+# KF_VERSION for the license README. Read from the same pinned file the
+# Linux/Windows builder image uses, so the version is maintained in one place.
+. "$PROJECT/docker/deps.env"
+
 APP="$BUILD_DIR/BlitzView.app"
 test -d "$APP"
 
@@ -27,6 +31,26 @@ echo "--- running macdeployqt:"
 
 FRAMEWORKS_DIR="$APP/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS_DIR"
+
+# kimageformats plugins (XCF, PSD, TGA, QOI, ...), built into the Qt prefix by
+# build.sh. macdeployqt normally takes the whole imageformats directory along,
+# but it decides that for itself -- copy whatever it left behind, so the macOS
+# package never reads fewer formats than the Linux one. The ad-hoc signing step
+# further down covers these files too, because it signs the whole bundle.
+echo "--- kimageformats plugins:"
+KIMG_DEST="$APP/Contents/PlugIns/imageformats"
+mkdir -p "$KIMG_DEST"
+kimg_count=0
+for plug in "$QT_MACOS_PREFIX/plugins/imageformats/"kimg_*; do
+    [ -e "$plug" ] || continue
+    [ -e "$KIMG_DEST/$(basename "$plug")" ] || cp "$plug" "$KIMG_DEST/"
+    kimg_count=$((kimg_count + 1))
+done
+[ "$kimg_count" -gt 0 ] || {
+    echo "ERROR: no kimg_* plugins in the Qt prefix -- run macbuild/build.sh first" >&2
+    exit 1
+}
+echo "  $kimg_count plugins in $KIMG_DEST"
 
 # ---------------------------------------------------------------------------
 # Copy Qt's bundled FFmpeg libraries not already deployed by macdeployqt.
@@ -138,6 +162,7 @@ FFMPEG_LIBS=$(ls "$FRAMEWORKS_DIR"/libav*.*.*.*.dylib "$FRAMEWORKS_DIR"/libsw*.*
 sed -e "s/@QT_VERSION@/$QT_VERSION/g" \
     -e "s/@QT_SERIES@/$QT_SERIES/g" \
     -e "s/@FFMPEG_LIBS@/$FFMPEG_LIBS/g" \
+    -e "s/@KF_VERSION@/$KF_VERSION/g" \
     "$PROJECT/licenses/README-macos.txt.in" > "$PORTABLE_DIR/licenses/README.txt"
 if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
     echo "ERROR: unsubstituted placeholder in licenses/README.txt" >&2
@@ -145,7 +170,7 @@ if grep -q '@[A-Z_]*@' "$PORTABLE_DIR/licenses/README.txt"; then
     exit 1
 fi
 
-for sub in BlitzView Qt FFmpeg; do
+for sub in BlitzView Qt FFmpeg kimageformats; do
     if [ ! -d "$PROJECT/licenses/$sub" ]; then
         echo "ERROR: licenses/$sub is missing -- the package must not ship without it" >&2
         exit 1
