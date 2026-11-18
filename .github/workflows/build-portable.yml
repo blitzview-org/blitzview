@@ -7,7 +7,7 @@ name: Build portable apps
 # Linux and Windows share the combined AlmaLinux 8 builder image (see
 # docker/, Makefile) and run as a matrix on ubuntu-latest. macOS is a
 # separate job (`build-macos`, below): there is no cross-compile path for
-# macOS the way MinGW covers Windows, so it runs natively on a macos-14
+# macOS the way MinGW covers Windows, so it runs natively on a macos-15
 # runner instead, entirely outside the Docker/Podman machinery.
 #
 # The Linux/Windows platforms run as separate matrix jobs. That is not just
@@ -122,7 +122,7 @@ jobs:
   # Native macOS build -- no builder image, no Docker/Podman. See macbuild/
   # for the scripts this drives.
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     name: build (macos)
     steps:
       - name: Checkout
@@ -146,7 +146,7 @@ jobs:
           path: qt
           key: qt-macos-${{ steps.qt.outputs.version }}-${{ hashFiles('docker/deps.env') }}
 
-      # macos-14's system Python is externally managed (PEP 668) -- a plain
+      # macos-15's system Python is externally managed (PEP 668) -- a plain
       # `pip install` is blocked. pipx (preinstalled on GitHub's macOS
       # runners) installs aqtinstall into its own venv and puts `aqt` on
       # PATH, sidestepping that restriction without needing --break-system-packages.
