@@ -29,12 +29,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # One artifact per platform (see build-portable.yml). merge-multiple
       # unpacks all of them into the same directory, restoring linux/,
       # windows/ and macos/.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: portable-*
           merge-multiple: true

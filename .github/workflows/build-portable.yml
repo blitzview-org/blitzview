@@ -50,7 +50,7 @@ jobs:
     name: build (${{ matrix.platform }})
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history + tags: git describe needs both
 
@@ -113,7 +113,7 @@ jobs:
       # the artifact, which is what the merged download in ci.yml and
       # release.yml globs against.
       - name: Upload portable package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: portable-${{ matrix.platform }}
           path: dist
@@ -126,7 +126,7 @@ jobs:
     name: build (macos)
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history + tags: git describe needs both
 
@@ -141,7 +141,7 @@ jobs:
       # see macbuild/build.sh for the CMAKE_OSX_ARCHITECTURES build.
       - name: Cache Qt (aqtinstall)
         id: qt-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: qt
           key: qt-macos-${{ steps.qt.outputs.version }}-${{ hashFiles('docker/deps.env') }}
@@ -159,7 +159,7 @@ jobs:
 
       - name: Cache FFmpeg headers
         id: ffmpeg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/macos/ffmpeg-include
           key: ffmpeg-headers-macos-${{ hashFiles('docker/deps.env') }}
@@ -178,7 +178,7 @@ jobs:
         run: macbuild/smoke-test.sh build/macos/BlitzView
 
       - name: Upload portable package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: portable-macos
           path: dist
