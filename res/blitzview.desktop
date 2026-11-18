@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=BlitzView
+GenericName=Media Browser
+Comment=Browse images and videos in grid or table view
+Exec=blitzview %F
+Icon=blitzview
+Terminal=false
+Categories=Graphics;Viewer;Photography;Qt;
+MimeType=inode/directory;
+Keywords=image;photo;video;viewer;browser;thumbnail;
+StartupWMClass=blitzview

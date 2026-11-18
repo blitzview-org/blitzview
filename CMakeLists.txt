@@ -194,6 +194,24 @@ target_precompile_headers(blitzview PRIVATE
 target_compile_definitions(blitzview PRIVATE QT_USE_QSTRINGBUILDER)
 
 # ---------------------------------------------------------------------------
+# System-wide installation (Linux only). `cmake --install` puts the binary,
+# the desktop entry and the hicolor icons where distribution packages (e.g.
+# the AUR package) expect them. The portable Linux package does NOT use this
+# -- it bundles everything into a self-contained directory instead.
+# The icons in res/icons/ are pre-scaled from res/BlitzViewIcon.png and
+# checked in, so installing needs no image tools at build time.
+# ---------------------------------------------------------------------------
+if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
+    install(TARGETS blitzview RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(FILES res/blitzview.desktop
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
+    install(DIRECTORY res/icons/
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/icons"
+            FILES_MATCHING PATTERN "*.png")
+endif()
+
+# ---------------------------------------------------------------------------
 # Portable-package launcher (Windows only). A tiny statically linked shim that
 # starts app\blitzview.exe, so the user sees one clean BlitzView.exe instead of
 # 60 MB of DLLs. See winbuild/launcher.c.

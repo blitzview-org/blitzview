@@ -55,6 +55,12 @@ well — `build/` holds one subdirectory per build type, so give it its own:
 cmake -B build/release -DCMAKE_BUILD_TYPE=Release && cmake --build build/release
 ```
 
+To install system-wide on Linux (binary, desktop entry and icons):
+
+```sh
+cmake --install build/release --prefix /usr/local
+```
+
 See the `Makefile` for the other targets — `make build` for a Debug build in
 `build/debug`, and `make linux-portable` / `make windows-portable` /
 `make macos-portable` for the self-contained portable packages. The
