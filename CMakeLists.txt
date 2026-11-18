@@ -112,6 +112,8 @@ set(HEADERS
     src/MediaItem.h
     src/MediaModel.h
     src/ThumbnailLoader.h
+    src/MemoryImageReader.h
+    src/MediaReadGate.h
     src/FullscreenTransition.h
     src/GridDelegate.h
     src/GridView.h

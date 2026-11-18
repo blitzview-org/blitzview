@@ -5,6 +5,8 @@
 #include "FfmpegThumbExtractor.h"
 #include "PageBackground.h"
 #include "SlideTrace.h"
+#include "MemoryImageReader.h"
+#include "MediaReadGate.h"
 
 #include <QImage>
 #include <QImageReader>
@@ -19,6 +21,7 @@
 
 namespace {
 constexpr int kJpegQuality = 85;
+
 
 // Geometry jitter (scrollbar gutter appearing, panel width, ±px window
 // resizes) moves the width-derived icon size by a few px. Extracting at
@@ -75,7 +78,8 @@ public:
                        const QSize& size,
                        int acceptKey,
                        ThumbnailLoader* loader,
-                       bool exifOnly = false)
+                       bool exifOnly = false,
+                       bool urgent = false)
         : m_epoch(epoch)
         , m_paths(std::move(paths))
         , m_isVideos(std::move(isVideos))
@@ -83,6 +87,7 @@ public:
         , m_acceptKey(acceptKey > 0 ? acceptKey : size.width())
         , m_loader(loader)
         , m_exifOnly(exifOnly)
+        , m_urgent(urgent)
     {
         setAutoDelete(true);
     }
@@ -127,7 +132,7 @@ public:
                         if (de.oriented.isValid() && !de.oriented.isEmpty())
                             cache.setOrientedSize(path, de.oriented.width(), de.oriented.height());
                         if (!de.smallThumb.isEmpty())
-                            cache.putSmall(path, de.smallThumb);
+                            cache.putSmall(path, de.smallThumb, de.smallSizeKey);
                         if (!de.largeThumb.isEmpty())
                             cache.putLarge(path, de.largeThumb, de.largeSizeKey);
                         m_loader->removePending(pendingKey);
@@ -136,85 +141,8 @@ public:
                     }
                 }
 
-                if (!isVideo) {
-                    const qint64 t0 = slideTraceMs();
-                    ExifThumbResult exif = extractExifThumbnail(path);
-                    TRACE_SLIDE("loader exif extract %s ok=%d dur=%lldms",
-                                qUtf8Printable(QFileInfo(path).fileName()),
-                                !exif.data.isEmpty(),
-                                (long long)(slideTraceMs() - t0));
-                    if (!exif.data.isEmpty()) {
-                        QImage img;
-                        img.loadFromData(exif.data, "JPEG");
-                        if (!img.isNull()) {
-                            QSize actualSize(exif.imageWidth, exif.imageHeight);
-                            bool hasActualSize = actualSize.isValid()
-                                                     && actualSize.width() > 0
-                                                     && actualSize.height() > 0;
-
-                            // Fallback: if SOF parser missed the dimensions (e.g.
-                            // large XMP/ICC segments push SOF beyond 64 KB),
-                            // use QImageReader which only reads headers.
-                            if (!hasActualSize) {
-                                QImageReader sizeReader(path);
-                                const QSize sz = sizeReader.size();
-                                if (sz.isValid() && sz.width() > 0 && sz.height() > 0) {
-                                    actualSize = sz;
-                                    hasActualSize = true;
-                                    // QImageReader returns pre-orientation dims
-                                    // (same as SOF), so orientation handling below
-                                    // stays correct.
-                                }
-                            }
-
-                            if (hasActualSize) {
-                                const qreal targetAr = qreal(actualSize.width()) / actualSize.height();
-                                const qreal thumbAr  = qreal(img.width()) / img.height();
-                                if (qAbs(targetAr - thumbAr) / qMax(targetAr, thumbAr) > 0.02) {
-                                    int cw = img.width(), ch = img.height();
-                                    if (thumbAr > targetAr)
-                                        cw = qRound(img.height() * targetAr);
-                                    else
-                                        ch = qRound(img.width() / targetAr);
-                                    img = img.copy((img.width() - cw) / 2,
-                                                   (img.height() - ch) / 2, cw, ch);
-                                }
-                            }
-                            img = applyExifOrientation(img, exif.orientation);
-
-                            // Compute oriented actual dimensions and store in cache
-                            QSize orientedActual;
-                            if (hasActualSize) {
-                                orientedActual = actualSize;
-                                if (exif.orientation >= 5 && exif.orientation <= 8)
-                                    orientedActual.transpose();
-                                cache.setOrientedSize(path, orientedActual.width(), orientedActual.height());
-                            }
-
-                            // ALWAYS scale to target size -- even when actual dims
-                            // are unknown, use the (cropped+oriented) thumb's own
-                            // aspect ratio so the cached JPEG fits in m_size.
-                            if (hasActualSize && orientedActual.isValid()) {
-                                const QSize targetDims = orientedActual.scaled(m_size, Qt::KeepAspectRatio);
-                                if (targetDims.isValid() && !targetDims.isEmpty())
-                                    img = img.scaled(targetDims, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                            } else {
-                                // No actual dims: scale using thumb's own aspect ratio
-                                const QSize targetDims = img.size().scaled(m_size, Qt::KeepAspectRatio);
-                                if (targetDims.isValid() && !targetDims.isEmpty())
-                                    img = img.scaled(targetDims, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                            }
-
-                            QByteArray jpegData;
-                            QBuffer buffer(&jpegData);
-                            buffer.open(QIODevice::WriteOnly);
-                            img.save(&buffer, "JPEG", kJpegQuality);
-                            cache.putSmall(path, jpegData);
-                            ThumbnailDiskCache::instance().writeSmall(path, jpegData, orientedActual);
-                            readyPaths.append(path);
-                        }
-                    }
-                }
+                if (!isVideo && extractExifStage(path, cache))
+                    readyPaths.append(path);
 
                 m_loader->removePending(pendingKey);
             } else {
@@ -222,39 +150,42 @@ public:
                 const int sizeKey = m_size.width();
                 const QString pendingKey = path + QLatin1Char('|') + QString::number(sizeKey);
 
-                if (cache.hasLarge(path) && cache.largeSize(path) >= m_acceptKey) {
+                if (cache.coversSize(path, m_acceptKey)) {
                     m_loader->removePending(pendingKey);
                     readyPaths.append(path);
                     continue;
                 }
 
-                // Disk tier: only a persisted large thumb at sufficient size
-                // avoids the full decode
+                // Disk tier: a persisted tier that covers the display need
+                // (large, or a small whose key covers it) avoids the decode.
                 {
                     ThumbnailDiskCache::Entry de = ThumbnailDiskCache::instance().read(path);
-                    TRACE_SLIDE("loader full disk %s large=%d(key %d) req=%d accept=%d %s",
+                    const bool largeHit = !de.largeThumb.isEmpty() && de.largeSizeKey >= m_acceptKey;
+                    const bool smallHit = !de.smallThumb.isEmpty() && de.smallSizeKey >= m_acceptKey;
+                    TRACE_SLIDE("loader full disk %s large=%d(key %d) small=%d(key %d) req=%d accept=%d %s",
                                 qUtf8Printable(QFileInfo(path).fileName()),
-                                !de.largeThumb.isEmpty(), de.largeSizeKey, sizeKey,
-                                m_acceptKey,
-                                (!de.largeThumb.isEmpty() && de.largeSizeKey >= m_acceptKey)
-                                    ? "HIT" : "MISS");
-                    if (!de.largeThumb.isEmpty() && de.largeSizeKey >= m_acceptKey) {
-                        if (de.oriented.isValid() && !de.oriented.isEmpty())
-                            cache.setOrientedSize(path, de.oriented.width(), de.oriented.height());
-                        cache.putLarge(path, de.largeThumb, de.largeSizeKey);
+                                !de.largeThumb.isEmpty(), de.largeSizeKey,
+                                !de.smallThumb.isEmpty(), de.smallSizeKey, sizeKey,
+                                m_acceptKey, (largeHit || smallHit) ? "HIT" : "MISS");
+                    if (de.oriented.isValid() && !de.oriented.isEmpty()
+                        && (!de.smallThumb.isEmpty() || !de.largeThumb.isEmpty()))
+                        cache.setOrientedSize(path, de.oriented.width(), de.oriented.height());
+                    if (largeHit || smallHit) {
+                        if (!de.smallThumb.isEmpty())
+                            cache.putSmall(path, de.smallThumb, de.smallSizeKey);
+                        if (!de.largeThumb.isEmpty())
+                            cache.putLarge(path, de.largeThumb, de.largeSizeKey);
                         m_loader->removePending(pendingKey);
                         readyPaths.append(path);
                         continue;
                     }
-                    // Large miss, but a persisted small (or a too-small large)
+                    // Miss, but a persisted small (or a too-small large)
                     // still gives an INSTANT preview while the full extraction
                     // runs — matters most for videos, whose extraction takes
                     // 100s of ms and which have no EXIF-thumb stage.
                     if (!cache.has(path)) {
-                        if (de.oriented.isValid() && !de.oriented.isEmpty())
-                            cache.setOrientedSize(path, de.oriented.width(), de.oriented.height());
                         if (!de.smallThumb.isEmpty())
-                            cache.putSmall(path, de.smallThumb);
+                            cache.putSmall(path, de.smallThumb, de.smallSizeKey);
                         else if (!de.largeThumb.isEmpty())
                             cache.putLarge(path, de.largeThumb, de.largeSizeKey);
                         if (!de.smallThumb.isEmpty() || !de.largeThumb.isEmpty())
@@ -262,18 +193,48 @@ public:
                     }
                 }
 
+                // Cold JPEG: the EXIF stage FIRST, inline. A 64 KB header
+                // read puts a preview on screen in milliseconds (a seek on
+                // a disk, instead of the 3 MB original), and when the
+                // embedded thumb covers the display need the original is
+                // never read at all. The visible wave used to go straight
+                // to the full decode and left cells white for seconds on a
+                // cold library.
+                if (!isVideo && !cache.hasSmall(path)) {
+                    if (extractExifStage(path, cache)) {
+                        m_loader->notifyBatchReady({path});
+                        if (cache.coversSize(path, m_acceptKey)) {
+                            m_loader->removePending(pendingKey);
+                            readyPaths.append(path);
+                            continue;
+                        }
+                    }
+                    if (!m_loader->isEpochCurrent(m_epoch))
+                        break;   // preview delivered; the full read is stale work
+                }
+
                 QImage resultImg;
+
                 QSize orientedFull; // oriented full-image dimensions
                 const qint64 t0 = slideTraceMs();
+                const SlideTraceRusage ru0 = SlideTraceRusage::now();
+                qint64 readMs = 0, readBytes = 0, waitMs = 0;
                 if (isVideo) {
-                    resultImg = loadVideoThumb(path);
+                    resultImg = loadVideoThumb(path, &waitMs);
                 } else {
-                    resultImg = loadImageThumb(path, &orientedFull);
+                    resultImg = loadImageThumb(path, &orientedFull, &readMs, &readBytes, &waitMs);
                 }
-                TRACE_SLIDE("loader full extract %s video=%d ok=%d key=%d dur=%lldms",
+                const SlideTraceRusage ru = SlideTraceRusage::now().since(ru0);
+                // wait= queued for a read slot, read= the file read itself,
+                // bytes= its size: a read that dominates dur at ~30 ms cpu
+                // is the storage medium, not the decoder.
+                TRACE_SLIDE("loader full extract %s video=%d ok=%d key=%d dur=%lldms "
+                            "urgent=%d wait=%lldms read=%lldms bytes=%lld cpu=%lldms majflt=%ld minflt=%ld nivcsw=%ld",
                             qUtf8Printable(QFileInfo(path).fileName()), isVideo,
                             !resultImg.isNull(), sizeKey,
-                            (long long)(slideTraceMs() - t0));
+                            (long long)(slideTraceMs() - t0), int(m_urgent),
+                            (long long)waitMs, (long long)readMs, (long long)readBytes,
+                            ru.cpuMs, ru.majflt, ru.minflt, ru.nivcsw);
                 if (!resultImg.isNull()) {
                     // Store oriented full-image dimensions for consistent sizing
                     if (orientedFull.isValid() && orientedFull.width() > 0 && orientedFull.height() > 0)
@@ -320,9 +281,115 @@ public:
     }
 
 private:
-    QImage loadImageThumb(const QString& path, QSize* orientedFull = nullptr) const
+    // EXIF stage: embedded thumbnail (JPEG only) → small tier in RAM and on
+    // disk. Returns true when a small was produced. Used by the EXIF prefetch
+    // tasks and, inline, by the full-decode path for cold items.
+    bool extractExifStage(const QString& path, ThumbnailCache& cache) const
     {
-        QImageReader reader(path);
+        const qint64 t0 = slideTraceMs();
+        ExifThumbResult exif = extractExifThumbnail(path, m_urgent);
+        TRACE_SLIDE("loader exif extract %s ok=%d dur=%lldms urgent=%d wait=%lldms read=%lldms",
+                    qUtf8Printable(QFileInfo(path).fileName()),
+                    !exif.data.isEmpty(),
+                    (long long)(slideTraceMs() - t0), int(m_urgent),
+                    (long long)exif.waitMs, (long long)exif.readMs);
+        if (!exif.data.isEmpty()) {
+            QImage img;
+            img.loadFromData(exif.data, "JPEG");
+            if (!img.isNull()) {
+                QSize actualSize(exif.imageWidth, exif.imageHeight);
+                bool hasActualSize = actualSize.isValid()
+                                         && actualSize.width() > 0
+                                         && actualSize.height() > 0;
+
+                // Fallback: if SOF parser missed the dimensions (e.g.
+                // large XMP/ICC segments push SOF beyond 64 KB),
+                // use QImageReader which only reads headers.
+                if (!hasActualSize) {
+                    // Reads the whole file — must stay rare (see
+                    // parseSofDimensions); the trace line proves it.
+                    MemoryImageReader sizeReader(path, m_urgent ? MemoryImageReader::Gate::Urgent
+                                                                : MemoryImageReader::Gate::Background);
+                    const QSize sz = sizeReader.reader->size();
+                    TRACE_SLIDE("loader exif size fallback %s read=%lldms bytes=%lld",
+                                qUtf8Printable(QFileInfo(path).fileName()),
+                                (long long)sizeReader.readMs, (long long)sizeReader.bytes.size());
+                    if (sz.isValid() && sz.width() > 0 && sz.height() > 0) {
+                        actualSize = sz;
+                        hasActualSize = true;
+                        // QImageReader returns pre-orientation dims
+                        // (same as SOF), so orientation handling below
+                        // stays correct.
+                    }
+                }
+
+                if (hasActualSize) {
+                    const qreal targetAr = qreal(actualSize.width()) / actualSize.height();
+                    const qreal thumbAr  = qreal(img.width()) / img.height();
+                    if (qAbs(targetAr - thumbAr) / qMax(targetAr, thumbAr) > 0.02) {
+                        int cw = img.width(), ch = img.height();
+                        if (thumbAr > targetAr)
+                            cw = qRound(img.height() * targetAr);
+                        else
+                            ch = qRound(img.width() / targetAr);
+                        img = img.copy((img.width() - cw) / 2,
+                                       (img.height() - ch) / 2, cw, ch);
+                    }
+                }
+                img = applyExifOrientation(img, exif.orientation);
+
+                // Size key of this small tier: the extraction box, capped by
+                // the embedded thumb's own (cropped) resolution — an upscaled
+                // 160 px thumb must not count as covering a 192 px cell
+                // (see ThumbnailCache::coversSize).
+                const int smallKey = qMin(qMax(img.width(), img.height()),
+                                          m_size.width());
+
+                // Compute oriented actual dimensions and store in cache
+                QSize orientedActual;
+                if (hasActualSize) {
+                    orientedActual = actualSize;
+                    if (exif.orientation >= 5 && exif.orientation <= 8)
+                        orientedActual.transpose();
+                    cache.setOrientedSize(path, orientedActual.width(), orientedActual.height());
+                }
+
+                // ALWAYS scale to target size -- even when actual dims
+                // are unknown, use the (cropped+oriented) thumb's own
+                // aspect ratio so the cached JPEG fits in m_size.
+                if (hasActualSize && orientedActual.isValid()) {
+                    const QSize targetDims = orientedActual.scaled(m_size, Qt::KeepAspectRatio);
+                    if (targetDims.isValid() && !targetDims.isEmpty())
+                        img = img.scaled(targetDims, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                } else {
+                    // No actual dims: scale using thumb's own aspect ratio
+                    const QSize targetDims = img.size().scaled(m_size, Qt::KeepAspectRatio);
+                    if (targetDims.isValid() && !targetDims.isEmpty())
+                        img = img.scaled(targetDims, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                }
+
+                QByteArray jpegData;
+                QBuffer buffer(&jpegData);
+                buffer.open(QIODevice::WriteOnly);
+                img.save(&buffer, "JPEG", kJpegQuality);
+                cache.putSmall(path, jpegData, smallKey);
+                ThumbnailDiskCache::instance().writeSmall(path, jpegData, orientedActual, smallKey);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    QImage loadImageThumb(const QString& path, QSize* orientedFull = nullptr,
+                          qint64* readMs = nullptr, qint64* readBytes = nullptr,
+                          qint64* waitMs = nullptr) const
+    {
+        MemoryImageReader mem(path, m_urgent ? MemoryImageReader::Gate::Urgent
+                                             : MemoryImageReader::Gate::Background);
+        if (readMs) *readMs = mem.readMs;
+        if (readBytes) *readBytes = mem.bytes.size();
+        if (waitMs) *waitMs = mem.waitMs;
+        QImageReader& reader = *mem.reader;
         reader.setAutoTransform(true);
         applyPaperBackground(reader, QFileInfo(path).suffix().toLower());
 
@@ -355,8 +422,12 @@ private:
         return img.scaled(m_size, Qt::KeepAspectRatio, mode);
     }
 
-    QImage loadVideoThumb(const QString& path) const
+    QImage loadVideoThumb(const QString& path, qint64* waitMs = nullptr) const
     {
+        // FFmpeg reads the container itself throughout the extraction, so
+        // the whole call sits inside the slot.
+        const MediaReadSlot slot(m_urgent, MediaReadGate::Kind::Video);
+        if (waitMs) *waitMs = slot.waitMs();
         QImage img = extractVideoThumbnail(path, m_size);
         if (img.isNull())
             return {};
@@ -370,6 +441,7 @@ private:
     int m_acceptKey = 0;
     ThumbnailLoader* m_loader = nullptr;
     bool m_exifOnly = false;
+    bool m_urgent = false;   // visible wave: urgent MediaReadGate slots
 };
 
 #include "ThumbnailLoader.moc"
@@ -437,7 +509,7 @@ bool ThumbnailLoader::requestChunk(const QStringList& filePaths,
 
     for (int i = 0; i < filePaths.size(); ++i) {
         const QString& fp = filePaths.at(i);
-        if (cache.hasLarge(fp) && cache.largeSize(fp) >= acceptKey) {
+        if (cache.coversSize(fp, acceptKey)) {
             alreadyCachedPaths.append(fp);
         } else {
             uncachedPaths.append(fp);
@@ -485,7 +557,14 @@ bool ThumbnailLoader::requestChunk(const QStringList& filePaths,
     if (taskPaths.isEmpty())
         return true;
 
-    const int workerSlices = qMax(1, qMin(m_workerCount, taskPaths.size()));
+    // The visible wave is I/O-bound and goes through MediaReadGate anyway:
+    // splitting it across all workers only makes 12 threads race for 2
+    // read slots, serving the screen in random order and sending the disk
+    // head all over the directory. As many chunks as read slots keeps the
+    // reads in display order (top to bottom, files mostly contiguous on
+    // disk). Background chunks still use every worker.
+    const int sliceCap = forceQueue ? MediaReadGate::instance().slotCount() : m_workerCount;
+    const int workerSlices = qMax(1, qMin(sliceCap, int(taskPaths.size())));
     const int basePerSlice = taskPaths.size() / workerSlices;
     const int extra = taskPaths.size() % workerSlices;
 
@@ -500,7 +579,8 @@ bool ThumbnailLoader::requestChunk(const QStringList& filePaths,
         auto* task = new ChunkThumbnailTask(epoch,
             taskPaths.mid(offset, count),
             taskIsVideos.mid(offset, count),
-            requestSize, acceptKey, this);
+            requestSize, acceptKey, this,
+            false /*exifOnly*/, forceQueue /*urgent: the visible wave*/);
         task->setAutoDelete(true);
         m_pool.start(task, priority - slice);
         offset += count;

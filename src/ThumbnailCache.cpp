@@ -38,6 +38,23 @@ int ThumbnailCache::largeSize(const QString& filePath) const
     return it->largeThumbSize;
 }
 
+int ThumbnailCache::smallSize(const QString& filePath) const
+{
+    QMutexLocker lk(&m_mutex);
+    auto it = m_entries.constFind(filePath);
+    if (it == m_entries.constEnd() || it->smallThumb.isEmpty()) return 0;
+    return it->smallThumbSize;
+}
+
+bool ThumbnailCache::coversSize(const QString& filePath, int key) const
+{
+    QMutexLocker lk(&m_mutex);
+    auto it = m_entries.constFind(filePath);
+    if (it == m_entries.constEnd()) return false;
+    if (!it->largeThumb.isEmpty() && it->largeThumbSize >= key) return true;
+    return !it->smallThumb.isEmpty() && it->smallThumbSize >= key;
+}
+
 QByteArray ThumbnailCache::getSmall(const QString& filePath)
 {
     QMutexLocker lk(&m_mutex);
@@ -66,12 +83,13 @@ QByteArray ThumbnailCache::getBest(const QString& filePath)
     return it->smallThumb;
 }
 
-void ThumbnailCache::putSmall(const QString& filePath, const QByteArray& jpeg)
+void ThumbnailCache::putSmall(const QString& filePath, const QByteArray& jpeg, int sizeKey)
 {
     if (jpeg.isEmpty()) return;
     QMutexLocker lk(&m_mutex);
     Entry& e = m_entries[filePath];
     e.smallThumb = jpeg;
+    e.smallThumbSize = sizeKey;
     e.lastUsedGeneration = ++m_generation;
 }
 

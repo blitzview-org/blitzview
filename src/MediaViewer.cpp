@@ -1,3 +1,4 @@
+#include "MemoryImageReader.h"
 #include "MediaViewer.h"
 
 #include "Shortcuts.h"
@@ -559,7 +560,8 @@ void MediaViewer::loadCurrent()
         m_player->setSource(QUrl());
         m_stack->setCurrentWidget(m_scrollArea);
 
-        QImageReader reader(item.filePath);
+        MemoryImageReader mem(item.filePath, MemoryImageReader::Gate::None);   // UI thread: never queue behind workers
+        QImageReader& reader = *mem.reader;
         reader.setAutoTransform(true);
         applyPaperBackground(reader, item.fileType);
         const QImage img = reader.read();

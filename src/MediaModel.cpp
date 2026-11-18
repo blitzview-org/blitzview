@@ -17,6 +17,8 @@
 #include <QIcon>
 #include <QImageReader>
 #include <QLocale>
+#include <QMap>
+#include <QDir>
 #include <QMimeData>
 #include <QSet>
 #include <QUrl>
@@ -105,6 +107,14 @@ MediaModel::MediaModel(QObject* parent) : QAbstractTableModel(parent)
     connect(m_backgroundPrefetch, &QTimer::timeout,
             this,             &MediaModel::onBackgroundPrefetch);
 
+    if (slideTraceEnabled()) {
+        m_decodeWatchdog = new QTimer(this);
+        m_decodeWatchdog->setInterval(200);
+        connect(m_decodeWatchdog, &QTimer::timeout,
+                this,             &MediaModel::checkDecodeStall);
+        m_decodeWatchdog->start();
+    }
+
     // Ready notifications arrive one per item from the "instant preview"
     // promotion inside the loader workers — hundreds per second on large
     // libraries. The per-notification bookkeeping stays inline (cheap), but
@@ -171,6 +181,7 @@ void MediaModel::cancelBackgroundWork()
 
     m_loader->cancelAll();
     m_decodePool.clear();
+    m_decodeQueued.store(0, std::memory_order_relaxed);
 
     // The scan/prime futures are deliberately NOT cancelled: QtConcurrent::run
     // is not interruptible, so a cancel would not shorten anything — it would
@@ -934,47 +945,94 @@ bool decodeThumbOffThread(const QString& path, int targetKey, qreal dpr, AsyncDe
 // and delivered back as queued batches that fill m_decodedCache and emit
 // dataChanged. Until delivery the delegate scales the previous pixmap (or
 // paints the placeholder for never-decoded items).
+//
+// Scheduling: the visible range must never wait behind stale work. Every
+// call starts its slices with a HIGHER pool priority than all earlier ones
+// (newest viewport first), and each worker re-checks the row of every item
+// against the keep window the UI thread publishes in setVisibleRows —
+// items that scrolled out of it are reported back as skipped (their pending
+// key is released so data() can re-request them if they return) instead
+// of being decoded for evictDecodedCache() to throw away. Rows are
+// captured at request time; a re-sort only costs one harmless skip since
+// the skip releases the pending key.
 void MediaModel::requestDecode(const QStringList& paths)
 {
     const int targetKey = m_thumbSize.width();
     const QString keySuffix = QLatin1Char('|') + QString::number(targetKey);
 
-    QStringList batch;
+    struct Job { QString path; int row; };
+    QList<Job> batch;
     batch.reserve(paths.size());
     for (const QString& fp : paths) {
         const QString pendingKey = fp + keySuffix;
         if (m_decodePending.contains(pendingKey))
             continue;
         m_decodePending.insert(pendingKey);
-        batch.append(fp);
+        batch.append(Job{fp, m_rowByPath.value(fp, -1)});
     }
     if (batch.isEmpty())
         return;
 
     const qreal dpr = qGuiApp->devicePixelRatio();
+    const int priority = ++m_decodeSeq;
+    m_decodeQueued.fetch_add(int(batch.size()), std::memory_order_relaxed);
 
     const int slices = qBound(1, int(batch.size() / 16) + 1,
                               m_decodePool.maxThreadCount());
     const int per = (int(batch.size()) + slices - 1) / slices;
     for (int off = 0; off < batch.size(); off += per) {
-        const QStringList slice = batch.mid(off, per);
+        const QList<Job> slice = batch.mid(off, per);
         auto* task = QRunnable::create([this, slice, targetKey, dpr]() {
+            QElapsedTimer timer;
+            timer.start();
+            const SlideTraceRusage ru0 = SlideTraceRusage::now();
+            m_decodeInflight.fetch_add(1, std::memory_order_relaxed);
+            {
+                qint64 expected = 0;
+                m_decodeOldestStart.compare_exchange_strong(expected, slideTraceMs());
+            }
             QList<AsyncDecoded> results;
             QStringList syncFallback;
+            QStringList skipped;
             results.reserve(slice.size());
-            for (const QString& fp : slice) {
+            for (const Job& job : slice) {
+                const int keepFirst = m_decodeKeepFirst.load(std::memory_order_relaxed);
+                const int keepLast  = m_decodeKeepLast.load(std::memory_order_relaxed);
+                if (job.row < keepFirst || job.row > keepLast) {
+                    skipped.append(job.path);
+                    continue;
+                }
                 AsyncDecoded r;
-                if (decodeThumbOffThread(fp, targetKey, dpr, r))
+                if (decodeThumbOffThread(job.path, targetKey, dpr, r))
                     results.append(std::move(r));
                 else
-                    syncFallback.append(fp);
+                    syncFallback.append(job.path);
             }
+            m_decodeQueued.fetch_sub(int(slice.size()), std::memory_order_relaxed);
+            if (m_decodeInflight.fetch_sub(1, std::memory_order_relaxed) == 1)
+                m_decodeOldestStart.store(0);
+            const qint64 decodeMs = timer.elapsed();
+            const SlideTraceRusage ru = SlideTraceRusage::now().since(ru0);
 
             QMetaObject::invokeMethod(this,
-                [this, results, syncFallback, targetKey]() {
+                [this, results, syncFallback, skipped, targetKey, decodeMs, ru]() {
                     const QString suffix = QLatin1Char('|') + QString::number(targetKey);
                     const bool current = (targetKey == m_thumbSize.width());
                     QList<int> rows;
+
+                    for (const QString& fp : skipped)
+                        m_decodePending.remove(fp + suffix);
+
+                    TRACE_SLIDE("decode done n=%d sync=%d skip=%d left=%d dur=%lldms "
+                                "cpu=%lldms majflt=%ld minflt=%ld nivcsw=%ld "
+                                "(visible %d..%d key=%d%s)",
+                                int(results.size()), int(syncFallback.size()),
+                                int(skipped.size()),
+                                m_decodeQueued.load(std::memory_order_relaxed),
+                                (long long)decodeMs, ru.cpuMs, ru.majflt, ru.minflt,
+                                ru.nivcsw,
+                                m_visibleFirst, m_visibleLast,
+                                targetKey, current ? "" : " STALE");
 
                     for (const AsyncDecoded& r : results) {
                         m_decodePending.remove(r.path + suffix);
@@ -1019,8 +1077,60 @@ void MediaModel::requestDecode(const QStringList& paths)
                                      {Qt::DecorationRole, Qt::UserRole + 4, Qt::UserRole + 5});
                 }, Qt::QueuedConnection);
         });
-        m_decodePool.start(task);
+        m_decodePool.start(task, priority);
     }
+}
+
+// Trace-only: see m_decodeWatchdog. Reads /proc/self/task/<tid>/{comm,wchan,
+// stat} — no ptrace, no root — and prints a histogram of (thread name,
+// state, wait point) so a stalled decode slice can be attributed.
+void MediaModel::checkDecodeStall()
+{
+    static const int stallMs = [] {
+        bool ok = false;
+        const int v = qEnvironmentVariableIntValue("BLITZVIEW_STALL_MS", &ok);
+        return ok ? v : 400;
+    }();
+    const qint64 now = slideTraceMs();
+    const qint64 oldest = m_decodeOldestStart.load();
+    // A negative threshold dumps once unconditionally (self-test of the
+    // dump itself — a healthy decode slice is too short to be caught).
+    const bool forced = stallMs < 0 && m_lastStallDump == 0;
+    if (!forced) {
+        if (oldest == 0)
+            return;
+        if (now - oldest < stallMs || now - m_lastStallDump < 1000)
+            return;
+    }
+    const qint64 age = oldest ? now - oldest : 0;
+    m_lastStallDump = now;
+
+    QMap<QString, int> histogram;
+#ifdef Q_OS_LINUX
+    const QDir tasks(QStringLiteral("/proc/self/task"));
+    const QStringList tids = tasks.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& tid : tids) {
+        auto readOne = [&](const char* name) {
+            QFile f(tasks.filePath(tid) + QLatin1Char('/') + QLatin1String(name));
+            if (!f.open(QIODevice::ReadOnly))
+                return QString();
+            return QString::fromLatin1(f.readAll()).trimmed();
+        };
+        const QString comm = readOne("comm");
+        const QString wchan = readOne("wchan");
+        const QString stat = readOne("stat");
+        // state is the field after the parenthesised comm
+        const int paren = stat.lastIndexOf(QLatin1Char(')'));
+        const QString state = paren >= 0 ? stat.mid(paren + 2, 1) : QStringLiteral("?");
+        ++histogram[comm + QLatin1Char('/') + state + QLatin1Char('/') + wchan];
+    }
+#endif
+    QString text;
+    for (auto it = histogram.cbegin(); it != histogram.cend(); ++it)
+        text += QStringLiteral(" %1x[%2]").arg(it.value()).arg(it.key());
+    TRACE_SLIDE("decode STALL age=%lldms inflight=%d queued=%d:%s",
+                (long long)age, m_decodeInflight.load(),
+                m_decodeQueued.load(), qUtf8Printable(text));
 }
 
 void MediaModel::decodeFromCache(const QString& filePath, int /*row*/) const
@@ -1394,7 +1504,7 @@ bool MediaModel::renameItem(int row, const QString& newFileName)
     // re-extraction, no flicker). The old disk entries become orphans and
     // age out via the LRU trim.
     if (!thumbs.smallThumb.isEmpty())
-        disk.writeSmall(newPath, thumbs.smallThumb, thumbs.oriented);
+        disk.writeSmall(newPath, thumbs.smallThumb, thumbs.oriented, thumbs.smallSizeKey);
     if (!thumbs.largeThumb.isEmpty())
         disk.writeLarge(newPath, thumbs.largeThumb, thumbs.largeSizeKey, thumbs.oriented);
     if (meta)
@@ -1517,6 +1627,12 @@ void MediaModel::setVisibleRows(int first, int last)
     m_visibleFirst = first;
     m_visibleLast  = last;
 
+    // Publish the decode keep window for the pool workers (see requestDecode)
+    // BEFORE queuing anything for the new range.
+    m_decodeKeepFirst.store(qMax(0, first - kDecodedMargin), std::memory_order_relaxed);
+    m_decodeKeepLast.store(qMin(int(m_items.size()) - 1, last + kDecodedMargin),
+                           std::memory_order_relaxed);
+
     // Queue visible items lacking a current-size pixmap for the ASYNC
     // decode (stale-size entries keep painting scaled until the fresh one
     // lands — the decode itself must never run on the UI thread here)
@@ -1547,7 +1663,7 @@ void MediaModel::setVisibleRows(int first, int last)
             const QString& fp = m_items.at(i).filePath;
             if (m_failedPaths.contains(fp))
                 continue;
-            if (!cache.hasLarge(fp) || cache.largeSize(fp) < targetKey) {
+            if (!cache.coversSize(fp, targetKey)) {
                 hasMissingVisible = true;
                 break;
             }
@@ -1571,12 +1687,25 @@ void MediaModel::setVisibleRows(int first, int last)
             m_visiblePriorityFirst = first;
             m_visiblePriorityLast = last;
             m_visiblePrioritySizeKey = sizeKey;
-            m_loader->clearQueue();
+            // cancelPending, not clearQueue: the epoch bump also stops the
+            // chunks ALREADY RUNNING after their current item. A scrollbar
+            // drag otherwise leaves every worker busy for seconds with
+            // full extractions of rows that are long gone, and the new
+            // visible wave waits for a free thread. Items of the old range
+            // still visible are simply part of the new wave.
+            m_loader->cancelPending();
             requestVisibleThumbnails(first, last, true);
         }
         return;
     }
 
+    if (m_visiblePriorityActive) {
+        // Nothing visible is missing, but a priority wave for a range the
+        // viewport has left is still queued/running — all of it off-screen
+        // now. Stop it; the debounced prefetch below re-issues whatever the
+        // new neighbourhood actually needs.
+        m_loader->cancelPending();
+    }
     m_visiblePriorityActive = false;
     m_visiblePriorityFirst = -1;
     m_visiblePriorityLast = -1;
@@ -1605,8 +1734,7 @@ void MediaModel::onScrollDebounced()
         const QString& fp = m_items.at(i).filePath;
         if (m_failedPaths.contains(fp))
             continue;
-        if (!m_loadedPaths.contains(fp) ||
-            !cache.hasLarge(fp) || cache.largeSize(fp) < targetKey) {
+        if (!m_loadedPaths.contains(fp) || !cache.coversSize(fp, targetKey)) {
             hasMissingVisible = true;
             break;
         }
@@ -1624,7 +1752,7 @@ void MediaModel::onScrollDebounced()
             m_visiblePriorityFirst = first;
             m_visiblePriorityLast = last;
             m_visiblePrioritySizeKey = targetKey;
-            m_loader->clearQueue();
+            m_loader->cancelPending();   // see setVisibleRows
             requestVisibleThumbnails(first, last, true);
         }
         return;
@@ -1649,7 +1777,7 @@ void MediaModel::requestVisibleThumbnails(int first, int last, bool visibleOnly)
     auto needsTarget = [&](int i) {
         const QString& fp = m_items.at(i).filePath;
         if (m_failedPaths.contains(fp)) return false;
-        return !cache.hasLarge(fp) || cache.largeSize(fp) < targetKey;
+        return !cache.coversSize(fp, targetKey);
     };
     auto needsPrefetch = [&](int i) {
         const QString& fp = m_items.at(i).filePath;

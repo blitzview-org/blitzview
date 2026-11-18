@@ -18,12 +18,21 @@ public:
     bool hasSmall(const QString& filePath) const;
     bool hasLarge(const QString& filePath) const;
     int  largeSize(const QString& filePath) const;
+    // Size key of the small tier: the box edge it was extracted for, capped
+    // by the embedded thumb's own resolution (0 = unknown / legacy entry).
+    int  smallSize(const QString& filePath) const;
+    // True when SOME tier already serves display key `key` sharply — the
+    // large tier, or a small tier whose smallSize covers it. This is what
+    // decides whether a full decode is needed at all: Samsung and most
+    // modern phones embed 512 px EXIF thumbs, so grid cells up to that
+    // size never need the 3 MB original read.
+    bool coversSize(const QString& filePath, int key) const;
 
     QByteArray getSmall(const QString& filePath);
     QByteArray getLarge(const QString& filePath);
     QByteArray getBest(const QString& filePath);  // large preferred, then small
 
-    void putSmall(const QString& filePath, const QByteArray& jpeg);
+    void putSmall(const QString& filePath, const QByteArray& jpeg, int sizeKey = 0);
     void putLarge(const QString& filePath, const QByteArray& jpeg, int sizeKey);
 
     // Store/retrieve oriented (display) image dimensions.
@@ -52,6 +61,7 @@ private:
         QByteArray smallThumb;   // EXIF/low-res JPEG
         QByteArray largeThumb;   // full-decode JPEG
         int        largeThumbSize = 0;
+        int        smallThumbSize = 0;  // see smallSize()
         quint64    lastUsedGeneration = 0;
         int        orientedWidth = 0;   // display-oriented image width (0 = unknown)
         int        orientedHeight = 0;  // display-oriented image height (0 = unknown)

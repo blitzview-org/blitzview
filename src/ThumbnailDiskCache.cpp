@@ -7,7 +7,10 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
-#include <QSaveFile>
+#include <QThread>
+#ifdef Q_OS_UNIX
+#include <cstdio>
+#endif
 #include <QStandardPaths>
 #include "SlideTrace.h"
 #include "AppShutdown.h"
@@ -32,10 +35,58 @@ constexpr quint16 kMetaVersion = 3;
 constexpr qint64 kTrimCheckInterval = 64 * 1024 * 1024;
 
 // Refresh the entry's mtime so the LRU trim sees it as recently used.
+// Only when it is actually stale: an mtime update is a journalled metadata
+// write, and doing one per read HIT (hundreds per second while scrolling a
+// warm library) kept the ext4 journal committing non-stop — the loader
+// workers then queued in jbd2_log_wait_commit and the disk was saturated
+// for the photo reads themselves. A day of LRU granularity is plenty.
+constexpr qint64 kTouchGranularityMs = 24 * 60 * 60 * 1000;
+
 void touchFile(const QString& path)
 {
+    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime mtime = QFileInfo(path).lastModified();
+    if (mtime.isValid() && mtime.msecsTo(now) < kTouchGranularityMs)
+        return;
     QFile f(path);
-    f.setFileTime(QDateTime::currentDateTime(), QFileDevice::FileModificationTime);
+    f.setFileTime(now, QFileDevice::FileModificationTime);
+}
+
+// Plain temp file + rename, NOT QSaveFile: QSaveFile::commit() fsyncs, and
+// one fsync per entry (12 workers, thousands of entries per session, plus
+// the metadata flush) forces a journal commit each time — on a busy disk
+// every worker then waits 100s of ms in jbd2_log_wait_commit and the photo
+// reads crawl behind the commits. A cache does not need durability: the
+// rename keeps the entry atomic for concurrent readers, and a truncated
+// entry after a crash simply fails the header check on read.
+bool writeAtomically(const QString& filePath, const QByteArray& blob)
+{
+    QDir().mkpath(QFileInfo(filePath).absolutePath());
+    const QString tmpPath = filePath + QLatin1String(".tmp")
+                          + QString::number(quintptr(QThread::currentThreadId()), 16);
+    {
+        QFile f(tmpPath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return false;
+        if (f.write(blob) != blob.size() || !f.flush()) {
+            f.remove();
+            return false;
+        }
+    }
+#ifdef Q_OS_UNIX
+    if (::rename(QFile::encodeName(tmpPath).constData(),
+                 QFile::encodeName(filePath).constData()) != 0) {
+        QFile::remove(tmpPath);
+        return false;
+    }
+#else
+    QFile::remove(filePath);   // QFile::rename never overwrites
+    if (!QFile::rename(tmpPath, filePath)) {
+        QFile::remove(tmpPath);
+        return false;
+    }
+#endif
+    return true;
 }
 
 // Header-only read: the stored sizeKey of a valid entry, or -1.
@@ -138,11 +189,10 @@ ThumbnailDiskCache::Entry ThumbnailDiskCache::read(const QString& mediaPath)
     if (base.isEmpty())
         return e;
 
-    int dummyKey = 0;
     const QString smallPath = base + QLatin1String(".bvs");
     const QString largePath = base + QLatin1String(".bvl");
 
-    if (readEntryFile(smallPath, e.smallThumb, dummyKey, e.oriented))
+    if (readEntryFile(smallPath, e.smallThumb, e.smallSizeKey, e.oriented))
         touchFile(smallPath);
     if (readEntryFile(largePath, e.largeThumb, e.largeSizeKey, e.oriented))
         touchFile(largePath);
@@ -153,19 +203,16 @@ ThumbnailDiskCache::Entry ThumbnailDiskCache::read(const QString& mediaPath)
 void ThumbnailDiskCache::writeFile(const QString& filePath, const QByteArray& jpeg,
                                    int sizeKey, const QSize& oriented)
 {
-    QDir().mkpath(QFileInfo(filePath).absolutePath());
-
-    QSaveFile f(filePath);
-    if (!f.open(QIODevice::WriteOnly))
-        return;
-
-    QDataStream ds(&f);
-    ds << kMagic << kVersion
-       << qint32(oriented.isValid() ? oriented.width() : 0)
-       << qint32(oriented.isValid() ? oriented.height() : 0)
-       << qint32(sizeKey)
-       << jpeg;
-    if (!f.commit())
+    QByteArray blob;
+    {
+        QDataStream ds(&blob, QIODevice::WriteOnly);
+        ds << kMagic << kVersion
+           << qint32(oriented.isValid() ? oriented.width() : 0)
+           << qint32(oriented.isValid() ? oriented.height() : 0)
+           << qint32(sizeKey)
+           << jpeg;
+    }
+    if (!writeAtomically(filePath, blob))
         return;
 
     const qint64 written = m_bytesSinceTrim.fetch_add(jpeg.size(), std::memory_order_relaxed)
@@ -177,13 +224,13 @@ void ThumbnailDiskCache::writeFile(const QString& filePath, const QByteArray& jp
 }
 
 void ThumbnailDiskCache::writeSmall(const QString& mediaPath, const QByteArray& jpeg,
-                                    const QSize& oriented)
+                                    const QSize& oriented, int sizeKey)
 {
     if (jpeg.isEmpty())
         return;
     const QString base = entryBase(mediaPath);
     if (!base.isEmpty())
-        writeFile(base + QLatin1String(".bvs"), jpeg, 0, oriented);
+        writeFile(base + QLatin1String(".bvs"), jpeg, sizeKey, oriented);
 }
 
 void ThumbnailDiskCache::writeLarge(const QString& mediaPath, const QByteArray& jpeg,
@@ -239,14 +286,12 @@ void ThumbnailDiskCache::writeMeta(const QString& mediaPath, const MediaMetadata
     if (base.isEmpty())
         return;
 
-    QDir().mkpath(QFileInfo(base).absolutePath());
-    QSaveFile f(base + QLatin1String(".bvm"));
-    if (!f.open(QIODevice::WriteOnly))
-        return;
-
-    QDataStream ds(&f);
-    ds << kMetaMagic << kMetaVersion << meta;
-    f.commit();
+    QByteArray blob;
+    {
+        QDataStream ds(&blob, QIODevice::WriteOnly);
+        ds << kMetaMagic << kMetaVersion << meta;
+    }
+    writeAtomically(base + QLatin1String(".bvm"), blob);
 }
 
 qint64 ThumbnailDiskCache::computeCurrentBytes() const

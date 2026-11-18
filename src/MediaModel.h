@@ -11,6 +11,8 @@
 #include <QFutureWatcher>
 #include <QThreadPool>
 #include <QFileSystemWatcher>
+#include <atomic>
+#include <limits>
 #include "MediaItem.h"
 
 class ThumbnailLoader;
@@ -117,6 +119,7 @@ private slots:
     void onMetadataReady(const QStringList& filePaths);
     void onScrollDebounced();
     void onBackgroundPrefetch();
+
     void onFsPathChanged(const QString& path);
 
 private:
@@ -203,6 +206,26 @@ private:
     // deliveries are dropped by their request key).
     QThreadPool              m_decodePool;
     QSet<QString>            m_decodePending;
+    // Decode scheduling (see requestDecode): tasks start with a rising
+    // priority so the NEWEST request runs first (the latest viewport), and
+    // workers skip items whose row has left the keep window
+    // [visibleFirst - kDecodedMargin, visibleLast + kDecodedMargin] by the
+    // time their slice runs — a scrollbar drag queues thousands of decodes
+    // for rows nobody will see, and FIFO let them starve the visible ones.
+    std::atomic<int>         m_decodeKeepFirst{0};
+    std::atomic<int>         m_decodeKeepLast{std::numeric_limits<int>::max()};
+    std::atomic<int>         m_decodeQueued{0};   // items in pool-queued slices
+    int                      m_decodeSeq = 0;     // priority counter
+    // Trace-only stall watchdog (BLITZVIEW_TRACE_SLIDE): a decode slice is
+    // milliseconds of work; when the oldest in-flight slice exceeds
+    // BLITZVIEW_STALL_MS (default 400) the UI timer dumps every thread's
+    // kernel wait point (/proc/self/task/*/wchan) so a trace shows WHAT the
+    // workers wait on (futex = lock, io_schedule = disk, ...).
+    std::atomic<int>         m_decodeInflight{0};
+    std::atomic<qint64>      m_decodeOldestStart{0};
+    QTimer*                  m_decodeWatchdog = nullptr;
+    qint64                   m_lastStallDump = 0;
+    void checkDecodeStall();
 
     // Persistent display-size map: remembers the pixel dimensions for each
     // (filePath, sizeKey) pair so that replacing an EXIF thumb with a full-decode

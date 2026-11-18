@@ -34,12 +34,13 @@ public:
         QByteArray smallThumb;       // EXIF/low-res JPEG
         QByteArray largeThumb;       // full-decode JPEG
         int        largeSizeKey = 0;
+        int        smallSizeKey = 0;     // ThumbnailCache::smallSize semantics (0 = legacy)
         QSize      oriented;         // display-oriented image dimensions (invalid = unknown)
     };
 
     Entry read(const QString& mediaPath);
     void writeSmall(const QString& mediaPath, const QByteArray& jpeg,
-                    const QSize& oriented);
+                    const QSize& oriented, int sizeKey = 0);
     void writeLarge(const QString& mediaPath, const QByteArray& jpeg,
                     int sizeKey, const QSize& oriented);
 

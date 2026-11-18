@@ -1,6 +1,9 @@
 #include "ExifThumbExtractor.h"
 
+#include <QElapsedTimer>
 #include <QFile>
+#include <cstring>
+#include "MediaReadGate.h"
 #include <QtEndian>
 
 // Lightweight JPEG EXIF thumbnail extractor.
@@ -19,15 +22,76 @@ static inline quint32 readU32(const uchar* p, bool bigEndian)
     return bigEndian ? qFromBigEndian<quint32>(p) : qFromLittleEndian<quint32>(p);
 }
 
-ExifThumbResult extractExifThumbnail(const QString& filePath)
+// Full-image dimensions from the SOF marker. Walks the marker chain from
+// SOI: inside the already-read header for free, beyond it with a 4-byte
+// seek+read per segment. Modern phone JPEGs place SOF past the 64 KB header
+// (Samsung: 60–75 KB, after a 40–50 KB APP1 plus ICC/XMP); the previous
+// fallback for that case was a QImageReader on the whole file — one 3 MB
+// read per thumbnail on the USB disk, for two numbers, and it made the
+// cold visible wave crawl at ~300 ms per cell. Runs inside the read slot.
+static void parseSofDimensions(QFile& file, const QByteArray& header, ExifThumbResult& result)
+{
+    const uchar* d = reinterpret_cast<const uchar*>(header.constData());
+    const qint64 size = header.size();
+    if (size < 4 || d[0] != 0xFF || d[1] != 0xD8)
+        return;
+
+    constexpr qint64 kMaxWalk = 16 * 1024 * 1024;
+    auto isSof = [](quint8 m) {
+        return (m >= 0xC0 && m <= 0xC3) || (m >= 0xC5 && m <= 0xC7) ||
+               (m >= 0xC9 && m <= 0xCB) || (m >= 0xCD && m <= 0xCF);
+    };
+    auto readAt = [&](qint64 pos, uchar* out, int n) -> bool {
+        if (pos + n <= size) {
+            memcpy(out, d + pos, n);
+            return true;
+        }
+        return file.seek(pos) && file.read(reinterpret_cast<char*>(out), n) == n;
+    };
+
+    qint64 pos = 2;
+    while (pos + 4 <= kMaxWalk) {
+        uchar hdr[4];
+        if (!readAt(pos, hdr, 4))
+            return;
+        if (hdr[0] != 0xFF)
+            return;
+        const quint8 m = hdr[1];
+        if (m == 0xFF) { ++pos; continue; }                       // fill byte
+        if (m == 0xDA) return;                                    // SOS: no SOF seen
+        if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { pos += 2; continue; } // no length
+        const int len = (hdr[2] << 8) | hdr[3];
+        if (isSof(m)) {
+            uchar sof[5];   // precision, height(2), width(2)
+            if (!readAt(pos + 4, sof, 5))
+                return;
+            result.imageHeight = (sof[1] << 8) | sof[2];
+            result.imageWidth  = (sof[3] << 8) | sof[4];
+            return;
+        }
+        if (len < 2)
+            return;
+        pos += 2 + len;
+    }
+}
+
+ExifThumbResult extractExifThumbnail(const QString& filePath, bool urgent)
 {
     ExifThumbResult result;
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly))
-        return result;
-
-    QByteArray header = file.read(kMaxExifRead);
+    QByteArray header;
+    {
+        const MediaReadSlot slot(urgent);   // storage access only, see MediaReadGate.h
+        result.waitMs = slot.waitMs();
+        QElapsedTimer timer;
+        timer.start();
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly))
+            return result;
+        header = file.read(kMaxExifRead);
+        parseSofDimensions(file, header, result);
+        result.readMs = timer.elapsed();
+    }
     const int size = header.size();
     if (size < 12)
         return result;
@@ -153,30 +217,8 @@ ExifThumbResult extractExifThumbnail(const QString& filePath)
         return result;
 
     result.data = header.mid(absOffset, static_cast<int>(thumbLength));
-
-    // Parse SOF markers to extract full image dimensions from the already-read header.
-    // This avoids a second file open via QImageReader just for the size.
-    {
-        int sPos = 2; // skip SOI
-        while (sPos + 4 < size) {
-            if (d[sPos] != 0xFF)
-                break;
-            const quint8 m = d[sPos + 1];
-            if (m == 0xDA) // SOS - no more markers
-                break;
-            const int sLen = (d[sPos + 2] << 8) | d[sPos + 3];
-            // SOF markers: 0xC0-0xC3, 0xC5-0xC7, 0xC9-0xCB, 0xCD-0xCF
-            if ((m >= 0xC0 && m <= 0xC3) || (m >= 0xC5 && m <= 0xC7) ||
-                (m >= 0xC9 && m <= 0xCB) || (m >= 0xCD && m <= 0xCF)) {
-                if (sPos + 9 < size) {
-                    result.imageHeight = (d[sPos + 5] << 8) | d[sPos + 6];
-                    result.imageWidth  = (d[sPos + 7] << 8) | d[sPos + 8];
-                }
-                break;
-            }
-            sPos += 2 + sLen;
-        }
-    }
+    // Full-image dimensions were parsed by parseSofDimensions() while the
+    // file was open (SOF usually sits beyond the 64 KB header).
 
     return result;
 }
