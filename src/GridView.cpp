@@ -442,13 +442,24 @@ void GridView::beginZoomGesture(bool pinFallbackNearest)
     // would move the pinned image away from the cursor by that amount
     stopScrollAnimation(true);
 
-    // A new gesture while the previous pinned settle still runs: carry
-    // the currently painted pin point over so the restart is jumpless
-    // (the frame is frozen, so the pinned item is the same one)
+    // A new gesture while the previous pinned settle still runs: the
+    // PAINTED plane (final raster plus the residual settle translation) is
+    // carried over as the gesture's start plane, and the pin is then
+    // re-resolved under the cursor ON THAT PLANE (resolvePinAt). The
+    // pinned ITEM is not necessarily the settling one: wheelEvent has
+    // already re-aimed the frame at whatever sits under the cursor NOW.
+    // An earlier version carried only the pin POINT and kept the old
+    // fraction while taking the item from the re-aimed frame — the old
+    // item's pin point then stood for the new item, which shifted the
+    // whole painted plane by the distance between the two items (exactly
+    // one cell in the trace: frac −0.175 at a cursor that sat at 0.89 of
+    // the neighbour) and the content jumped at the first notch.
     bool carryPin = false;
+    FlowParams carryFlow;
     QPointF carryPoint;
-    if (m_zoomPinSettling
+    if (m_zoomPinSettling && m_zoomPinItem >= 0
         && m_reflowAnim->state() == QAbstractAnimation::Running) {
+        carryFlow = paintedPinFlow(nullptr);
         const qreal t = m_reflowAnim->currentValue().toReal();
         carryPoint = m_zoomPinPointFrom
             + (m_zoomPinPointTo - m_zoomPinPointFrom) * t;
@@ -474,6 +485,20 @@ void GridView::beginZoomGesture(bool pinFallbackNearest)
     // every step reflows around the pinned item. Without a frame the
     // gesture paints the frozen raster as a uniform scale instead.
     int pin = m_hoverIndex >= 0 ? m_hoverIndex : m_externalFocusRow;
+    if (carryPin && m_sourceModel && m_sourceModel->rowCount() > 0) {
+        // Settle carry: the painted plane becomes the start plane (From ==
+        // To, still expressed relative to the SETTLING item, whose frac is
+        // still in place), then the pin is re-resolved under the cursor
+        // on it — item, fraction and pin point come out consistent with
+        // what is on screen, and the frame follows (moveFocus). Jumpless
+        // by construction, whichever item the cursor is on now.
+        m_zoomPinFlowFrom = m_zoomPinFlowTo = carryFlow;
+        m_zoomPinPointFrom = m_zoomPinPointTo = carryPoint;
+        resolvePinAt(QPointF(viewport()->mapFromGlobal(QCursor::pos())));
+        pin = m_zoomPinItem;
+    } else {
+        carryPin = false;
+    }
     if (pin < 0 && pinFallbackNearest && m_sourceModel
         && m_sourceModel->rowCount() > 0) {
         // The PAN can grab the plane anywhere: without a focus frame the
@@ -500,34 +525,51 @@ void GridView::beginZoomGesture(bool pinFallbackNearest)
         // — the frame is then MOVED to the cursor by the first step's
         // reflow. Measured against the thumb, not the cell: the label/pad
         // chrome does not scale, so only a thumb fraction names the same
-        // IMAGE point at every zoom level. A settle carry keeps the
-        // previous fraction (same item, and its cell has moved off the
-        // raster position).
-        const QPointF m(viewport()->mapFromGlobal(QCursor::pos()));
-        const QSizeF cs(m_zoomBaseLayout.cell);
-        const int cols = qMax(1, m_zoomBaseLayout.cols);
-        const int vi = pin + m_zoomBaseLayout.gridOffset;
-        const QPointF tl((vi % cols) * cs.width(),
-                         (vi / cols - m_zoomBaseLayout.firstRow) * cs.height());
+        // IMAGE point at every zoom level. A settle carry has already
+        // resolved item, fraction and pin point on the painted plane
+        // (above) — nothing to derive from the raster then.
         if (!carryPin) {
+            const QPointF m(viewport()->mapFromGlobal(QCursor::pos()));
+            const QSizeF cs(m_zoomBaseLayout.cell);
+            const int cols = qMax(1, m_zoomBaseLayout.cols);
+            const int vi = pin + m_zoomBaseLayout.gridOffset;
+            const QPointF tl((vi % cols) * cs.width(),
+                             (vi / cols - m_zoomBaseLayout.firstRow)
+                                 * cs.height());
             const qreal icon = qMax(1, m_zoomBaseIconSize);
             m_zoomPinFrac = QRectF(tl, cs).contains(m)
                 ? QPointF((m.x() - tl.x() - GridDelegate::thumbInsetX()) / icon,
                           (m.y() - tl.y() - GridDelegate::thumbPadTop()) / icon)
                 : QPointF(0.5, 0.5);
+            // Resting pin state: the base raster anchored at the pinned
+            // item, pin point at its on-screen position
+            m_zoomPinFlowFrom = m_zoomPinFlowTo =
+                pinRelativeFlow(m_zoomBaseLayout, m_zoomBaseIconSize, pin);
+            m_zoomPinPointFrom = m_zoomPinPointTo =
+                tl + pinOffset(m_zoomBaseIconSize);
         }
-        // Resting pin state: the base raster anchored at the pinned item,
-        // pin point at its current on-screen position (mid-settle
-        // position on a carry — the first step then travels from there)
-        m_zoomPinFlowFrom = m_zoomPinFlowTo =
-            pinRelativeFlow(m_zoomBaseLayout, m_zoomBaseIconSize, pin);
-        m_zoomPinPointFrom = m_zoomPinPointTo = carryPin
-            ? carryPoint
-            : tl + pinOffset(m_zoomBaseIconSize);
         emitFocusChange();
     }
 
     m_zoomGestureActive = true;
+    // Keep the viewport WIDTH stable for the whole gesture: with the
+    // default AsNeeded policy the live raster steps make the vertical
+    // scrollbar appear (or vanish) between two notches, the viewport
+    // resizes, every cell rescales mid-gesture and the pin flow has to be
+    // retargeted (see retargetPinSettle). Freezing the policy at the
+    // gesture-start state (AlwaysOn if the bar shows now, AlwaysOff if not
+    // — the same rule AsNeeded applies) changes nothing visible at this
+    // point; the bar only follows the raster on release
+    // (endZoomGesture), where the settle absorbs the resize anyway. The
+    // scrollbar's VALUE and RANGE keep tracking the raster meanwhile — only
+    // the widget's visibility is held.
+    if (!m_zoomSbPolicyHeld) {
+        m_zoomSbPolicyHeld = true;
+        const QScrollBar* vb = verticalScrollBar();
+        setVerticalScrollBarPolicy(vb->maximum() > vb->minimum()
+                                       ? Qt::ScrollBarAlwaysOn
+                                       : Qt::ScrollBarAlwaysOff);
+    }
     // The Ctrl release may be delivered to any widget — filter globally
     qApp->installEventFilter(this);
     m_zoomIdleTimer->start();
@@ -940,6 +982,15 @@ void GridView::endZoomGesture(bool commit)
     qApp->removeEventFilter(this);
     m_zoomIdleTimer->stop();
     m_zoomSharpTimer->stop();
+    // Let the scrollbar follow the final raster again (held since
+    // beginZoomGesture). A viewport resize this causes is delivered with
+    // the gesture already inactive and no settle running yet, so
+    // retargetPinSettle stays out of it and the commit below computes its
+    // settle from the final geometry.
+    if (m_zoomSbPolicyHeld) {
+        m_zoomSbPolicyHeld = false;
+        setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    }
     if (commit) {
         commitZoomGesture();
     } else {
@@ -1492,6 +1543,17 @@ void GridView::paintEvent(QPaintEvent* event)
 // ("a jerk at the very end, after everything animated into place").
 // Retargeting is jumpless: the currently painted state becomes the new
 // From, the target is recomputed from the LIVE raster, the deadline keeps.
+//
+// A resize DURING the gesture (window drag with Ctrl held; the scrollbar
+// toggle is kept out of the gesture, see beginZoomGesture) is a different
+// case: the pin point must STAY where it is — at the cursor — and only the
+// window-flush flow is re-derived for the new cell geometry. Treating it
+// like the settle (an earlier version did) slid the pin point onto its
+// raster position mid-gesture, and the next wheel step, re-resolving the
+// pin under the unmoved cursor, then named a DIFFERENT image point
+// (frac jumped from (0.549,0.424) to (0.996,0.263) in the trace) — the
+// content visibly jumped under the cursor. Item and fraction are never
+// touched here: the pin reference is the user's, geometry only.
 void GridView::retargetPinSettle()
 {
     if (m_zoomPinItem < 0
@@ -1508,6 +1570,22 @@ void GridView::retargetPinSettle()
     const int cols = qMax(1, cur.cols);
     const int vi = qMax(0, m_zoomPinItem) + cur.gridOffset;
     m_zoomPinFlowTo = pinRelativeFlow(cur, m_iconSize, m_zoomPinItem);
+    if (m_zoomGestureActive && !m_zoomPinSettling) {
+        // Mid-gesture: pin point unchanged (cursor side), window-flush
+        // basePx re-derived for the new cell width (same formula as
+        // updatePinnedZoomStep), fold row renormalized
+        m_zoomPinFlowTo.basePx =
+            (m_zoomPinPointTo.x() - pinOffset(m_iconSize).x())
+            - qreal(m_zoomPinItem) * cur.cell.width();
+        renormPinFlow(m_zoomPinFlowTo);
+        TRACE_SLIDE("zoom pin retarget (resize) item=%d frac=(%.3f,%.3f) "
+                    "icon=%d cell=%dx%d",
+                    m_zoomPinItem, m_zoomPinFrac.x(), m_zoomPinFrac.y(),
+                    m_iconSize, cur.cell.width(), cur.cell.height());
+        m_zoomSharpTarget = m_iconSize;
+        startZoomPinAnim(true);
+        return;
+    }
     m_zoomPinPointTo = QPointF(qreal(vi % cols) * cur.cell.width(),
                                qreal(vi / cols - cur.firstRow)
                                    * cur.cell.height())

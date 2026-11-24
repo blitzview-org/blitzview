@@ -312,7 +312,9 @@ private:
     // retarget with the remaining time, like startReflowAnimation.
     void startZoomPinAnim(bool keepDeadline);
     void commitZoomGesture();                  // Ctrl released: anchored reflow
-    // Re-aims a running pin settle at the LIVE raster after a resize
+    // Re-aims a running pin settle at the LIVE raster after a resize; during
+    // an active gesture it keeps the pin point (cursor) and item/fraction
+    // and only re-derives the window-flush flow for the new cell geometry
     void retargetPinSettle();
     void endZoomGesture(bool commit);          // commit=false: drop (model reset)
     // Call BEFORE a layout mutation: freezes the currently painted flow
@@ -453,6 +455,10 @@ private:
     // mouse move). Releasing the BUTTON only disengages the pan — the
     // gesture (and the shifted plane) stays until Ctrl is released.
     bool                   m_zoomPanActive = false;
+    // Vertical scrollbar policy frozen for the gesture (AlwaysOn/Off as it
+    // stood at gesture start, restored to AsNeeded by endZoomGesture): a
+    // bar appearing between two notches resizes the viewport mid-gesture.
+    bool                   m_zoomSbPolicyHeld = false;
     // Last RAW mouse position of the pan — the drag delta base. Separate
     // from m_zoomPinPointTo: the pin reference gets re-anchored (clamped
     // into the covered strip) when the mouse leaves the grid area, while
