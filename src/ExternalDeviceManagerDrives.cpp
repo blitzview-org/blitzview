@@ -49,20 +49,26 @@ QList<ExternalDevice> ExternalDeviceManager::allDevices()
     return result;
 }
 
-QString ExternalDeviceManager::mount(const QString& deviceName, QString* errorOut)
+void ExternalDeviceManager::mountAsync(const ExternalDevice& device,
+                                       QObject* context, OpCallback done)
 {
     // Windows mounts removable media automatically; there is nothing to do
     // and nothing sensible to offer if it did not happen.
-    Q_UNUSED(deviceName);
-    if (errorOut)
-        *errorOut = QObject::tr("Mounting is handled by the operating system.");
-    return QString();
+    Q_UNUSED(device);
+    QTimer::singleShot(0, context, [done]() {
+        OpResult result;
+        result.error = QObject::tr("Mounting is handled by the operating system.");
+        done(result);
+    });
 }
 
-bool ExternalDeviceManager::unmount(const QString& deviceName, QString* errorOut)
+void ExternalDeviceManager::unmountAsync(const ExternalDevice& device,
+                                         QObject* context, OpCallback done)
 {
-    Q_UNUSED(deviceName);
-    if (errorOut)
-        *errorOut = QObject::tr("Ejecting must be done through the system's own dialog.");
-    return false;
+    Q_UNUSED(device);
+    QTimer::singleShot(0, context, [done]() {
+        OpResult result;
+        result.error = QObject::tr("Ejecting must be done through the system's own dialog.");
+        done(result);
+    });
 }

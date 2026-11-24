@@ -9,8 +9,9 @@
 #include <QDBusMetaType>
 #include <QDBusObjectPath>
 #include <QDBusArgument>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDebug>
-#include <QProcess>
 
 #include "ExternalDeviceManager.h"
 #include "DeviceId.h"
@@ -166,49 +167,79 @@ QList<ExternalDevice> ExternalDeviceManager::allDevices()
     return result;
 }
 
-QString ExternalDeviceManager::mount(const QString& deviceName, QString* errorOut)
+namespace {
+
+// Generous on purpose: the call stays pending while the user types a password
+// into the polkit dialog, and a timeout there would report a bogus failure
+// for a mount that still goes through.
+constexpr int kMountCallTimeoutMs = 5 * 60 * 1000;
+
+/// Calls @p method on the device's Filesystem interface and hands the reply
+/// to @p onReply once it arrives. The empty options map leaves
+/// auth.no_user_interaction off, so the session's polkit agent may ask.
+void callFilesystem(const ExternalDevice& device, const QString& method,
+                    QObject* context,
+                    std::function<void(const QDBusPendingCall&)> onReply)
 {
-    QProcess process;
-    process.start("udisksctl", QStringList() << "mount" << "-b" << deviceName);
-    process.waitForFinished(10000);
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        "org.freedesktop.UDisks2",
+        device.deviceId.toString(),
+        "org.freedesktop.UDisks2.Filesystem",
+        method);
+    msg << QVariantMap();
 
-    if (process.exitCode() != 0) {
-        if (errorOut)
-            *errorOut = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-        return QString();
-    }
-
-    // udisksctl reports "Mounted /dev/sdb1 at /run/media/user/LABEL."
-    QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
-    int atIdx = output.indexOf(" at ");
-    if (atIdx >= 0) {
-        QString mountPoint = output.mid(atIdx + 4);
-        if (mountPoint.endsWith('.'))
-            mountPoint.chop(1);
-        return mountPoint.trimmed();
-    }
-
-    // Older versions phrase it differently — fall back to asking UDisks2.
-    const QList<ExternalDevice> devices = allDevices();
-    for (const ExternalDevice& device : devices) {
-        if (device.deviceName == deviceName && !device.mountPath.isEmpty())
-            return device.mountPath;
-    }
-    return QString();
+    const QDBusPendingCall call =
+        QDBusConnection::systemBus().asyncCall(msg, kMountCallTimeoutMs);
+    // Parented to the context: if it dies first, the watcher goes with it
+    // and the reply is dropped.
+    auto* watcher = new QDBusPendingCallWatcher(call, context);
+    QObject::connect(watcher, &QDBusPendingCallWatcher::finished, context,
+                     [watcher, onReply = std::move(onReply)]() {
+        onReply(*watcher);
+        watcher->deleteLater();
+    });
 }
 
-bool ExternalDeviceManager::unmount(const QString& deviceName, QString* errorOut)
+void fillError(ExternalDeviceManager::OpResult& result, const QDBusError& error)
 {
-    QProcess process;
-    process.start("udisksctl", QStringList() << "unmount" << "-b" << deviceName);
-    process.waitForFinished(10000);
+    result.error = error.message();
+    // org.freedesktop.UDisks2.Error.NotAuthorizedDismissed: the user closed
+    // the polkit dialog.
+    result.dismissed = error.name().endsWith("NotAuthorizedDismissed");
+}
 
-    if (process.exitCode() != 0) {
-        if (errorOut)
-            *errorOut = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-        return false;
-    }
-    return true;
+} // namespace
+
+void ExternalDeviceManager::mountAsync(const ExternalDevice& device,
+                                       QObject* context, OpCallback done)
+{
+    callFilesystem(device, "Mount", context,
+                   [done = std::move(done)](const QDBusPendingCall& call) {
+        const QDBusPendingReply<QString> reply = call;
+        OpResult result;
+        if (reply.isError()) {
+            fillError(result, reply.error());
+        } else {
+            result.ok = true;
+            result.mountPath = reply.value();
+        }
+        done(result);
+    });
+}
+
+void ExternalDeviceManager::unmountAsync(const ExternalDevice& device,
+                                         QObject* context, OpCallback done)
+{
+    callFilesystem(device, "Unmount", context,
+                   [done = std::move(done)](const QDBusPendingCall& call) {
+        const QDBusPendingReply<> reply = call;
+        OpResult result;
+        if (reply.isError())
+            fillError(result, reply.error());
+        else
+            result.ok = true;
+        done(result);
+    });
 }
 
 #include "ExternalDeviceManagerUdisks.moc"

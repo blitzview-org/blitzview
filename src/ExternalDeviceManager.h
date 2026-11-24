@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QList>
+#include <functional>
 #include <QSet>
 #include <QString>
 #include "DeviceId.h"
@@ -29,14 +30,27 @@ public:
 
     static QList<QString> allMountPaths();
 
-    /// Mounts @p deviceName and returns the resulting mount path, or an empty
-    /// string on failure (then @p errorOut, if given, holds the reason).
-    /// Backends without mount support always fail.
-    static QString mount(const QString& deviceName, QString* errorOut = nullptr);
+    /// Outcome of mountAsync() / unmountAsync().
+    struct OpResult {
+        bool ok = false;
+        /// The user cancelled the authorization dialog — not an error worth
+        /// reporting.
+        bool dismissed = false;
+        QString mountPath;  // mountAsync() only
+        QString error;      // human-readable reason when !ok
+    };
+    using OpCallback = std::function<void(const OpResult&)>;
 
-    /// Unmounts @p deviceName. Returns false on failure, with the reason in
-    /// @p errorOut if given.
-    static bool unmount(const QString& deviceName, QString* errorOut = nullptr);
+    /// Starts mounting @p device without blocking. @p done runs later in
+    /// @p context's thread — never synchronously, and not at all if
+    /// @p context is destroyed first. Backends without mount support always
+    /// report failure.
+    static void mountAsync(const ExternalDevice& device, QObject* context,
+                           OpCallback done);
+
+    /// Starts unmounting @p device; same callback contract as mountAsync().
+    static void unmountAsync(const ExternalDevice& device, QObject* context,
+                             OpCallback done);
 
     /// Re-reads the mount state and emits mountChanged() for every difference.
     /// Called by the backends when they notice something may have changed.

@@ -5,6 +5,7 @@
 #include "AppSettings.h"
 #include "Path.h"
 
+#include <QApplication>
 #include <QTreeView>
 #include <QFileSystemModel>
 #include <QVBoxLayout>
@@ -349,6 +350,13 @@ DirectoryPanel::DirectoryPanel(QWidget* parent) : QWidget(parent)
         if (!mounted)
             clearIfUnderPath(mountPath);
     });
+
+    // Any navigation while a mount/unmount is pending cancels the jump to
+    // the mount path once it completes.
+    connect(this, &DirectoryPanel::selectedDirectoriesChanged,
+            this, [this](const QStringList&, const QStringList&) { ++m_navGeneration; });
+    connect(this, &DirectoryPanel::treeAnchorChanged,
+            this, [this](const QString&) { ++m_navGeneration; });
 
     connect(m_tree, &QTreeView::collapsed, this, [this](const QModelIndex&) {
         m_tree->viewport()->update();
@@ -860,22 +868,27 @@ void DirectoryPanel::populateDeviceMenu()
         emptyAction->setEnabled(false);
     } else {
         for (const ExternalDevice& device : devices) {
+            const bool pending = m_pendingDevices.contains(device.deviceId);
             QStyle::StandardPixmap iconType = device.mountPath.isEmpty()
                 ? QStyle::SP_DriveHDIcon : QStyle::SP_DirIcon;
 
+            QString text = device.displayName();
+            if (pending && device.mountPath.isEmpty())
+                text += tr(" (mounting…)");
+
             QAction* action = m_deviceMenu->addAction(
-                style()->standardIcon(iconType), device.displayName());
+                style()->standardIcon(iconType), text);
 
-            QString deviceName = device.deviceName;
-            QString mountPath  = device.mountPath;
-
-            if (mountPath.isEmpty()) {
-                connect(action, &QAction::triggered, this, [this, deviceName]() {
-                    QString mountPoint = mountDevice(deviceName);
-                    if (!mountPoint.isEmpty())
-                        navigateToRoot(mountPoint);
-                });
+            if (device.mountPath.isEmpty()) {
+                if (pending) {
+                    action->setEnabled(false);
+                } else {
+                    connect(action, &QAction::triggered, this, [this, device]() {
+                        mountDevice(device);
+                    });
+                }
             } else {
+                QString mountPath = device.mountPath;
                 connect(action, &QAction::triggered, this, [this, mountPath]() {
                     navigateToRoot(mountPath);
                 });
@@ -889,14 +902,18 @@ void DirectoryPanel::populateDeviceMenu()
                     m_deviceMenu->addSeparator();
                     hasMounted = true;
                 }
-                QString deviceName = device.deviceName;
-                QString mountPath  = device.mountPath;
-                QAction* unmountAction = m_deviceMenu->addAction(
-                    tr("Unmount %1").arg(device.displayName()));
-                connect(unmountAction, &QAction::triggered, this, [this, deviceName, mountPath]() {
-                    unmountDevice(deviceName);
-                    clearIfUnderPath(mountPath);
-                });
+                const bool pending = m_pendingDevices.contains(device.deviceId);
+                QString text = tr("Unmount %1").arg(device.displayName());
+                if (pending)
+                    text += tr(" (unmounting…)");
+                QAction* unmountAction = m_deviceMenu->addAction(text);
+                if (pending) {
+                    unmountAction->setEnabled(false);
+                } else {
+                    connect(unmountAction, &QAction::triggered, this, [this, device]() {
+                        unmountDevice(device);
+                    });
+                }
             }
         }
     }
@@ -920,22 +937,51 @@ void DirectoryPanel::setTreeAnchor(const QString& newAnchor)
         static_cast<AnchorLabel*>(m_anchorLabel)->setText(newAnchor);
 }
 
-QString DirectoryPanel::mountDevice(const QString& devicePath)
+void DirectoryPanel::mountDevice(const ExternalDevice& device)
 {
-    QString error;
-    const QString mountPoint = ExternalDeviceManager::mount(devicePath, &error);
-    if (mountPoint.isEmpty())
-        QMessageBox::warning(this, tr("Mount Error"),
-            tr("Failed to mount %1:\n%2").arg(devicePath, error));
-    return mountPoint;
+    m_pendingDevices.insert(device.deviceId);
+    const quint64 gen = m_navGeneration;
+    QApplication::setOverrideCursor(Qt::BusyCursor);
+    emit busyMessage(tr("Mounting %1…").arg(device.displayName()));
+
+    QString deviceName = device.deviceName;
+    ExternalDeviceManager::mountAsync(device, this,
+            [this, device, deviceName, gen](const ExternalDeviceManager::OpResult& result) {
+        m_pendingDevices.remove(device.deviceId);
+        QApplication::restoreOverrideCursor();
+        emit busyMessage(QString());
+
+        if (result.ok) {
+            if (gen == m_navGeneration)
+                navigateToRoot(result.mountPath);
+        } else if (!result.dismissed) {
+            QMessageBox::warning(this, tr("Mount Error"),
+                tr("Failed to mount %1:\n%2").arg(deviceName, result.error));
+        }
+    });
 }
 
-void DirectoryPanel::unmountDevice(const QString& devicePath)
+void DirectoryPanel::unmountDevice(const ExternalDevice& device)
 {
-    QString error;
-    if (!ExternalDeviceManager::unmount(devicePath, &error))
-        QMessageBox::warning(this, tr("Unmount Error"),
-            tr("Failed to unmount %1:\n%2").arg(devicePath, error));
+    m_pendingDevices.insert(device.deviceId);
+    QApplication::setOverrideCursor(Qt::BusyCursor);
+    emit busyMessage(tr("Unmounting %1…").arg(device.displayName()));
+
+    QString deviceName = device.deviceName;
+    QString mountPath = device.mountPath;
+    ExternalDeviceManager::unmountAsync(device, this,
+            [this, device, deviceName, mountPath](const ExternalDeviceManager::OpResult& result) {
+        m_pendingDevices.remove(device.deviceId);
+        QApplication::restoreOverrideCursor();
+        emit busyMessage(QString());
+
+        if (result.ok) {
+            clearIfUnderPath(mountPath);
+        } else if (!result.dismissed) {
+            QMessageBox::warning(this, tr("Unmount Error"),
+                tr("Failed to unmount %1:\n%2").arg(deviceName, result.error));
+        }
+    });
 }
 
 void DirectoryPanel::clearIfUnderPath(const QString& path)

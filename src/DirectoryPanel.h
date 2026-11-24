@@ -1,9 +1,12 @@
 #pragma once
 
 #include <QMap>
+#include <QSet>
 #include <QUrl>
 #include <QWidget>
 #include "DirTree.h"
+#include "DeviceId.h"
+#include "ExternalDevice.h"
 
 class QTreeView;
 class QToolBar;
@@ -34,6 +37,8 @@ signals:
     void selectedDirectoriesChanged(const QStringList& recursive,
                                     const QStringList& individual);
     void treeAnchorChanged(const QString& anchor);
+    // Status-bar text for an in-flight mount/unmount; empty means "done".
+    void busyMessage(const QString& text);
     void hideRequested();
     // File drop onto a directory in the tree; copy/move is decided upstream
     void filesDroppedOnDir(const QList<QUrl>& urls, const QString& targetDir);
@@ -57,8 +62,8 @@ private:
     void populateDeviceMenu();
     QString commonNextChild() const;
     QString findRootForPath(const QString& path);
-    QString mountDevice(const QString& devicePath);
-    void unmountDevice(const QString& devicePath);
+    void mountDevice(const ExternalDevice& device);
+    void unmountDevice(const ExternalDevice& device);
     void clearIfUnderPath(const QString& path);
     bool selectRangeTo(const QModelIndex& targetIdx);
     void setTreeAnchor(const QString& anchor);
@@ -82,4 +87,6 @@ private:
     QStringList         m_pendingExpandPaths;
     QString             m_pendingSelectPath;
     QMap<QString,QString> m_rootMemory;
+    QSet<DeviceId>      m_pendingDevices;  // mount/unmount in flight
+    quint64             m_navGeneration = 0;  // bumped on any navigation
 };

@@ -596,6 +596,12 @@ MainWindow::MainWindow(const QStringList& initialDirs, QWidget* parent,
         if (m_actSidePanel)
             m_actSidePanel->setChecked(false);
     });
+    connect(m_dirPanel, &DirectoryPanel::busyMessage, this, [this](const QString& text) {
+        if (text.isEmpty())
+            statusBar()->clearMessage();
+        else
+            statusBar()->showMessage(text);
+    });
 
     // The item carrying the focus frame (mouse hover, or the file of the
     // Details/viewer window driving the external focus) feeds the details
