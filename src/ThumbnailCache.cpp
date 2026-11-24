@@ -46,13 +46,46 @@ int ThumbnailCache::smallSize(const QString& filePath) const
     return it->smallThumbSize;
 }
 
+bool ThumbnailCache::smallCovers(const Entry& e, int key)
+{
+    return !e.smallThumb.isEmpty() && e.smallThumbSize >= key;
+}
+
+bool ThumbnailCache::largeCovers(const Entry& e, int key)
+{
+    return !e.largeThumb.isEmpty() && e.largeThumbSize >= key;
+}
+
 bool ThumbnailCache::coversSize(const QString& filePath, int key) const
 {
     QMutexLocker lk(&m_mutex);
     auto it = m_entries.constFind(filePath);
     if (it == m_entries.constEnd()) return false;
-    if (!it->largeThumb.isEmpty() && it->largeThumbSize >= key) return true;
-    return !it->smallThumb.isEmpty() && it->smallThumbSize >= key;
+    return largeCovers(*it, key) || smallCovers(*it, key);
+}
+
+QByteArray ThumbnailCache::getDisplaySource(const QString& filePath, int key, bool* sharp)
+{
+    if (sharp) *sharp = false;
+    QMutexLocker lk(&m_mutex);
+    auto it = m_entries.find(filePath);
+    if (it == m_entries.end()) return {};
+    it->lastUsedGeneration = ++m_generation;
+    // The small tier first: when it covers, it is the cheaper decode.
+    if (smallCovers(*it, key)) {
+        if (sharp) *sharp = true;
+        return it->smallThumb;
+    }
+    if (largeCovers(*it, key)) {
+        if (sharp) *sharp = true;
+        return it->largeThumb;
+    }
+    // Neither covers: blurry fallback from the higher-resolution tier
+    // (large on a tie; legacy small entries key as 0).
+    if (!it->largeThumb.isEmpty()
+        && (it->smallThumb.isEmpty() || it->largeThumbSize >= it->smallThumbSize))
+        return it->largeThumb;
+    return it->smallThumb;
 }
 
 QByteArray ThumbnailCache::getSmall(const QString& filePath)

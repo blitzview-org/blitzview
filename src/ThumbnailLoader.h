@@ -6,6 +6,7 @@
 #include <QSize>
 #include <QMutex>
 #include <QSet>
+#include <QHash>
 #include <QStringList>
 #include <atomic>
 
@@ -43,6 +44,17 @@ public:
     void removePending(const QString& key);
     bool isEpochCurrent(quint64 epoch) const;
 
+    // EXIF-miss memory: JPEGs without a usable embedded thumbnail. Without
+    // it every prefetch round re-requested their EXIF stage forever (the
+    // item never became "loaded"). Recorded with the file's mtime + size.
+    // isKnownExifMiss: path-only lookup, cheap enough for the UI thread's
+    // request routing (a known miss is requested as a full decode instead).
+    // exifMissStillValid: worker side, re-stats the file — a changed file
+    // drops the entry and gets its EXIF stage tried again.
+    bool isKnownExifMiss(const QString& path) const;
+    bool exifMissStillValid(const QString& path);
+    void recordExifMiss(const QString& path);
+
 signals:
     void thumbnailReady(const QStringList& filePaths);
     // Full decode failed permanently (corrupt/unreadable file). EXIF prefetch
@@ -59,4 +71,8 @@ private:
     int         m_maxPendingJobs = 64;
     std::atomic<quint64> m_cancelEpoch{1};
     QSet<QString> m_pending;
+
+    struct ExifMissStamp { qint64 mtimeMs = 0; qint64 size = 0; };
+    mutable QMutex m_exifMissMutex;   // own lock: m_mutex is worker-contended
+    QHash<QString, ExifMissStamp> m_exifMisses;
 };

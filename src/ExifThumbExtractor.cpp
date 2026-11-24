@@ -194,7 +194,12 @@ ExifThumbResult extractExifThumbnail(const QString& filePath, bool urgent)
 
     for (int i = 0; i < ifd1Count && ifd1Pos + 12 <= app1End; ++i, ifd1Pos += 12) {
         quint16 tag = readU16(d + ifd1Pos, bigEndian);
-        quint32 value = readU32(d + ifd1Pos + 8, bigEndian);
+        // A SHORT value sits left-aligned in the 4-byte field: reading it as
+        // LONG yields value << 16 in big-endian (MM) files, which made every
+        // MM thumbnail fail the compression check.
+        const quint16 type = readU16(d + ifd1Pos + 2, bigEndian);
+        quint32 value = (type == 3) ? readU16(d + ifd1Pos + 8, bigEndian)
+                                    : readU32(d + ifd1Pos + 8, bigEndian);
 
         switch (tag) {
         case 0x0103: compression = static_cast<quint16>(value); break; // Compression

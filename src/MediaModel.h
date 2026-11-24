@@ -234,6 +234,10 @@ private:
 
     void requestVisibleThumbnails(int first, int last, bool visibleOnly = false);
     void continueBackgroundPrefetch();
+    // JPEG whose embedded EXIF thumb is still worth trying: the cheap
+    // preview stage. A known EXIF miss is routed like a non-JPEG (full
+    // decode) instead of being re-requested as EXIF in every prefetch round.
+    bool hasExifStage(const MediaItem& item) const;
     void onScanFinished();
 
     // Remembered sort so it can be re-applied after async scan

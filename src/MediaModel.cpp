@@ -898,31 +898,10 @@ bool decodeThumbOffThread(const QString& path, int targetKey, qreal dpr, AsyncDe
 
     const QSize targetBox(targetKey, targetKey);
     const QSize scaledSize = oriented.scaled(targetBox, Qt::KeepAspectRatio);
-    const QSize devSize = scaledSize * dpr;
 
-    // Same source selection as decodeFromCache: smallest source that still
-    // covers the display size.
+    // Same source selection as decodeFromCache (one helper, by size key).
     bool sharp = false;
-    QByteArray jpeg = cache.getSmall(path);
-    if (!jpeg.isEmpty()) {
-        QBuffer probe(&jpeg);
-        probe.open(QIODevice::ReadOnly);
-        QImageReader probeReader(&probe, "jpeg");
-        const QSize dims = probeReader.size();
-        if (dims.width() >= devSize.width() && dims.height() >= devSize.height())
-            sharp = true;
-        else
-            jpeg.clear();
-    }
-    if (jpeg.isEmpty()) {
-        jpeg = cache.getLarge(path);
-        if (!jpeg.isEmpty()) {
-            sharp = cache.largeSize(path) >= qRound(targetKey * dpr);
-        } else {
-            jpeg = cache.getSmall(path);
-            sharp = false;
-        }
-    }
+    QByteArray jpeg = cache.getDisplaySource(path, qRound(targetKey * dpr), &sharp);
     if (jpeg.isEmpty())
         return false;
 
@@ -1172,33 +1151,11 @@ void MediaModel::decodeFromCache(const QString& filePath, int /*row*/) const
     // Pick the SMALLEST cached source that still covers the display size:
     // at small cell sizes, decoding the 45 px pixmap from the small tier is
     // an order of magnitude cheaper than from a 1300 px large thumb — and
-    // quality is identical once the source covers the target. The decode
-    // runs synchronously on the UI thread, so this choice dominates how
-    // fast a cached directory fills the grid.
-    const QSize devSize = scaledSize * dpr;
+    // quality is identical once the source covers the target. Coverage is
+    // decided by the cache SIZE KEYS (device pixels, see
+    // invalidateThumbnails), the same predicate as coversSize.
     bool sharp = false;
-    QByteArray jpeg = cache.getSmall(filePath);
-    if (!jpeg.isEmpty()) {
-        QBuffer probe(&jpeg);
-        probe.open(QIODevice::ReadOnly);
-        QImageReader probeReader(&probe, "jpeg");
-        const QSize dims = probeReader.size();
-        if (dims.width() >= devSize.width() && dims.height() >= devSize.height())
-            sharp = true;
-        else
-            jpeg.clear();   // small does not cover — try the large tier
-    }
-    if (jpeg.isEmpty()) {
-        jpeg = cache.getLarge(filePath);
-        if (!jpeg.isEmpty()) {
-            // The cache stores extraction sizes in device pixels (see
-            // invalidateThumbnails) — compare against the device-sized target
-            sharp = cache.largeSize(filePath) >= qRound(targetKey * dpr);
-        } else {
-            jpeg = cache.getSmall(filePath);   // blurry preview fallback
-            sharp = false;
-        }
-    }
+    QByteArray jpeg = cache.getDisplaySource(filePath, qRound(targetKey * dpr), &sharp);
     if (jpeg.isEmpty()) return;
 
     // Decode directly at display size: the JPEG handler uses libjpeg DCT
@@ -1853,7 +1810,7 @@ void MediaModel::requestVisibleThumbnails(int first, int last, bool visibleOnly)
                     const MediaItem& item = m_items.at(i);
                     if (m_loadedPaths.contains(item.filePath)) continue;
                     if (m_failedPaths.contains(item.filePath)) continue;
-                    if (!item.isVideo && (item.fileType == QLatin1String("jpg") || item.fileType == QLatin1String("jpeg"))) {
+                    if (hasExifStage(item)) {
                         exifPaths.append(item.filePath);
                         exifIsVideos.append(false);
                     }
@@ -1862,22 +1819,18 @@ void MediaModel::requestVisibleThumbnails(int first, int last, bool visibleOnly)
                     m_loader->requestExifPrefetch(exifPaths, exifIsVideos, priority--);
             }
             // Items with NO cheap preview stage first (videos, non-JPEG
-            // formats): their cells stay WHITE until the full extraction
-            // lands, while JPEGs show the EXIF small almost immediately.
+            // formats, known EXIF misses): their cells stay WHITE until the
+            // full extraction lands, while JPEGs show the EXIF small almost
+            // immediately.
             // Extracting the white cells before the JPEG sharpening makes
             // the grid visually complete much earlier on cold starts
             // (previously the videos queued BEHIND all JPEG fulls and
             // trickled in white for hundreds of ms).
-            auto isJpeg = [&](int i) {
-                const MediaItem& item = m_items.at(i);
-                return !item.isVideo
-                       && (item.fileType == QLatin1String("jpg")
-                           || item.fileType == QLatin1String("jpeg"));
-            };
+            auto hasPreview = [&](int i) { return hasExifStage(m_items.at(i)); };
             const bool okNoPreview = enqueueChunk(c.first, c.last, targetKey, forceQueue,
-                [&](int i) { return needsTarget(i) && !isJpeg(i); });
+                [&](int i) { return needsTarget(i) && !hasPreview(i); });
             const bool okJpeg = enqueueChunk(c.first, c.last, targetKey, forceQueue,
-                [&](int i) { return needsTarget(i) && isJpeg(i); });
+                [&](int i) { return needsTarget(i) && hasPreview(i); });
             if (!okNoPreview || !okJpeg) { queueFull = true; break; }
         } else {
             // EXIF prefetch for non-visible items
@@ -1887,7 +1840,7 @@ void MediaModel::requestVisibleThumbnails(int first, int last, bool visibleOnly)
                 for (int i = c.first; i <= c.last; ++i) {
                     if (!needsPrefetch(i)) continue;
                     const MediaItem& item = m_items.at(i);
-                    if (!item.isVideo && (item.fileType == QLatin1String("jpg") || item.fileType == QLatin1String("jpeg"))) {
+                    if (hasExifStage(item)) {
                         exifPaths.append(item.filePath);
                         exifIsVideos.append(false);
                     }
@@ -1895,17 +1848,25 @@ void MediaModel::requestVisibleThumbnails(int first, int last, bool visibleOnly)
                 if (!exifPaths.isEmpty())
                     m_loader->requestExifPrefetch(exifPaths, exifIsVideos, basePriority - chunkIdx);
             }
-            // Full decode for non-JPEG items that have no thumbnail
+            // Full decode for items without an EXIF stage (non-JPEG, known
+            // EXIF misses) that have no thumbnail
             auto needsNonJpegPrefetch = [&](int i) {
                 const MediaItem& item = m_items.at(i);
                 if (m_loadedPaths.contains(item.filePath)) return false;
                 if (m_failedPaths.contains(item.filePath)) return false;
-                return item.isVideo || (item.fileType != QLatin1String("jpg") && item.fileType != QLatin1String("jpeg"));
+                return !hasExifStage(item);
             };
             const bool ok = enqueueChunk(c.first, c.last, 128, false, needsNonJpegPrefetch);
             if (!ok) { queueFull = true; break; }
         }
     }
+}
+
+bool MediaModel::hasExifStage(const MediaItem& item) const
+{
+    return !item.isVideo
+           && (item.fileType == QLatin1String("jpg") || item.fileType == QLatin1String("jpeg"))
+           && !m_loader->isKnownExifMiss(item.filePath);
 }
 
 void MediaModel::onThumbnailReady(const QStringList& filePaths)
@@ -2058,7 +2019,7 @@ void MediaModel::continueBackgroundPrefetch()
             const MediaItem& item = m_items.at(idx);
             if (!m_loadedPaths.contains(item.filePath)
                 && !m_failedPaths.contains(item.filePath)) {
-                if (!item.isVideo && (item.fileType == QLatin1String("jpg") || item.fileType == QLatin1String("jpeg"))) {
+                if (hasExifStage(item)) {
                     exifPaths.append(item.filePath);
                     exifIsVideos.append(false);
                 } else {

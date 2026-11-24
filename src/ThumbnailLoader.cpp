@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QThread>
 #include <QFileInfo>
+#include <QDateTime>
 #include <QMetaObject>
 #include <QBuffer>
 #include <QtGlobal>
@@ -141,7 +142,10 @@ public:
                     }
                 }
 
-                if (!isVideo && extractExifStage(path, cache))
+                // Known miss: the model routes it to a full decode; a request
+                // that still arrives (queued before the miss) must not re-read.
+                if (!isVideo && !m_loader->exifMissStillValid(path)
+                    && extractExifStage(path, cache))
                     readyPaths.append(path);
 
                 m_loader->removePending(pendingKey);
@@ -200,7 +204,7 @@ public:
                 // never read at all. The visible wave used to go straight
                 // to the full decode and left cells white for seconds on a
                 // cold library.
-                if (!isVideo && !cache.hasSmall(path)) {
+                if (!isVideo && !cache.hasSmall(path) && !m_loader->exifMissStillValid(path)) {
                     if (extractExifStage(path, cache)) {
                         m_loader->notifyBatchReady({path});
                         if (cache.coversSize(path, m_acceptKey)) {
@@ -259,8 +263,12 @@ public:
                         QBuffer smallBuffer(&smallJpeg);
                         smallBuffer.open(QIODevice::WriteOnly);
                         smallImg.save(&smallBuffer, "JPEG", kJpegQuality);
-                        cache.putSmall(path, smallJpeg);
-                        ThumbnailDiskCache::instance().writeSmall(path, smallJpeg, orientedFull);
+                        // Keyed by its real resolution: the display decode
+                        // picks tiers by size key, and an unkeyed (0) small
+                        // would never count as covering a small cell.
+                        const int smallKey = qMax(smallImg.width(), smallImg.height());
+                        cache.putSmall(path, smallJpeg, smallKey);
+                        ThumbnailDiskCache::instance().writeSmall(path, smallJpeg, orientedFull, smallKey);
                     }
                     readyPaths.append(path);
                 } else {
@@ -377,6 +385,7 @@ private:
                 return true;
             }
         }
+        m_loader->recordExifMiss(path);
         return false;
     }
 
@@ -621,6 +630,9 @@ bool ThumbnailLoader::requestExifPrefetch(const QStringList& filePaths,
                 continue;
             }
 
+            if (isKnownExifMiss(fp))
+                continue;
+
             if (available <= 0)
                 continue;
 
@@ -708,6 +720,41 @@ void ThumbnailLoader::removePending(const QString& key)
 {
     QMutexLocker lk(&m_mutex);
     m_pending.remove(key);
+}
+
+bool ThumbnailLoader::isKnownExifMiss(const QString& path) const
+{
+    QMutexLocker lk(&m_exifMissMutex);
+    return m_exifMisses.contains(path);
+}
+
+bool ThumbnailLoader::exifMissStillValid(const QString& path)
+{
+    ExifMissStamp stamp;
+    {
+        QMutexLocker lk(&m_exifMissMutex);
+        auto it = m_exifMisses.constFind(path);
+        if (it == m_exifMisses.constEnd())
+            return false;
+        stamp = *it;
+    }
+    const QFileInfo fi(path);   // stat only, outside the lock
+    if (fi.exists() && fi.lastModified().toMSecsSinceEpoch() == stamp.mtimeMs
+        && fi.size() == stamp.size)
+        return true;
+    QMutexLocker lk(&m_exifMissMutex);
+    m_exifMisses.remove(path);
+    return false;
+}
+
+void ThumbnailLoader::recordExifMiss(const QString& path)
+{
+    const QFileInfo fi(path);
+    if (!fi.exists())
+        return;   // unreadable/vanished: not a property of the content
+    const ExifMissStamp stamp{fi.lastModified().toMSecsSinceEpoch(), fi.size()};
+    QMutexLocker lk(&m_exifMissMutex);
+    m_exifMisses.insert(path, stamp);
 }
 
 void ThumbnailLoader::onThumbnailCompleted(const QStringList& /*filePaths*/)

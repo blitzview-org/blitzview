@@ -28,6 +28,15 @@ public:
     // size never need the 3 MB original read.
     bool coversSize(const QString& filePath, int key) const;
 
+    // Source for the DISPLAY decode at device-pixel key `key`: the smallest
+    // tier that covers it by SIZE KEY (the coversSize predicate — never the
+    // JPEG's pixel dimensions: an embedded 160 px thumb is stored UPSCALED to
+    // the extraction box, so its pixels claim a resolution it does not
+    // have). *sharp = true when the returned tier covers `key`; otherwise
+    // the higher-resolution tier is returned as a blurry fallback, so the
+    // ready flush re-decodes once a covering tier lands.
+    QByteArray getDisplaySource(const QString& filePath, int key, bool* sharp);
+
     QByteArray getSmall(const QString& filePath);
     QByteArray getLarge(const QString& filePath);
     QByteArray getBest(const QString& filePath);  // large preferred, then small
@@ -66,6 +75,10 @@ private:
         int        orientedWidth = 0;   // display-oriented image width (0 = unknown)
         int        orientedHeight = 0;  // display-oriented image height (0 = unknown)
     };
+
+    // The one "tier serves key" predicate (coversSize, getDisplaySource).
+    static bool smallCovers(const Entry& e, int key);
+    static bool largeCovers(const Entry& e, int key);
 
     mutable QMutex          m_mutex;
     QHash<QString, Entry>   m_entries;
