@@ -3,6 +3,7 @@
 #include "MediaContextMenu.h"
 #include "FileOps.h"
 #include "FocusFrame.h"
+#include "PlayBadge.h"
 #include "SlideTrace.h"
 
 #include <QApplication>
@@ -50,22 +51,8 @@ public:
         const int thumbH = qMin(di.height(), option.rect.height() - 4);
         const int thumbW = qMin(di.width(), option.rect.width() - 4);
         const int side = qMin(thumbW, thumbH);
-        const int r = side * 3 / 10;
-        const QPoint c = option.rect.center();
-
-        painter->setRenderHint(QPainter::Antialiasing, true);
-        painter->setBrush(QColor(0, 0, 0, 120));
-        painter->setPen(Qt::NoPen);
-        painter->drawEllipse(c, r, r);
-        const int tri = r * 6 / 10;
-        const int offX = tri / 4;
-        QPainterPath path;
-        path.moveTo(c.x() - tri/2 + offX, c.y() - tri);
-        path.lineTo(c.x() + tri   + offX, c.y());
-        path.lineTo(c.x() - tri/2 + offX, c.y() + tri);
-        path.closeSubpath();
-        painter->setBrush(QColor(255, 255, 255, 200));
-        painter->drawPath(path);
+        drawPlayBadge(painter, QRectF(option.rect).center(),
+                      playBadgeRadiusFor(side));   // shared look
         painter->restore();
     }
 };

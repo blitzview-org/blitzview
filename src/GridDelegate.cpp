@@ -1,4 +1,5 @@
 #include "GridDelegate.h"
+#include "PlayBadge.h"
 
 #include "TagSymbols.h"
 #include "FocusFrame.h"
@@ -104,22 +105,9 @@ void GridDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
 
 void GridDelegate::drawVideoOverlay(QPainter* painter, const QRect& dest) const
 {
-    const int r = qMin(dest.width(), dest.height()) * 3 / 10;
-    const QPoint c = dest.center();
-    painter->setRenderHint(QPainter::Antialiasing, true);
-    painter->setBrush(QColor(0, 0, 0, 120));
-    painter->setPen(Qt::NoPen);
-    painter->drawEllipse(c, r, r);
-    const int tri = r * 6 / 10;
-    const int offX = tri / 4;
-    QPainterPath path;
-    path.moveTo(c.x() - tri/2 + offX, c.y() - tri);
-    path.lineTo(c.x() + tri   + offX, c.y());
-    path.lineTo(c.x() - tri/2 + offX, c.y() + tri);
-    path.closeSubpath();
-    painter->setBrush(QColor(255, 255, 255, 200));
-    painter->drawPath(path);
-    painter->setRenderHint(QPainter::Antialiasing, false);
+    // Shared with the list view and the viewer's end-of-video poster
+    drawPlayBadge(painter, QRectF(dest).center(),
+                  playBadgeRadiusFor(qMin(dest.width(), dest.height())));
 }
 
 void GridDelegate::drawTagBadges(QPainter* painter, const QRect& dest,

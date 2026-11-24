@@ -2253,7 +2253,19 @@ void GridView::selectAll()
 
 void GridView::copySelection()
 {
-    FileOps::setClipboardFiles(selectedUrls(), FileOps::Op::Copy);
+    // A single still image additionally goes on the clipboard as pixel data
+    // (lazily decoded), so it can be pasted into an image editor. Several
+    // items or a video stay a plain file list.
+    QString stillImage;
+    if (m_selected.size() == 1 && m_sourceModel) {
+        const int r = *m_selected.cbegin();
+        if (r < m_sourceModel->rowCount()) {
+            const MediaItem& item = m_sourceModel->item(r);
+            if (!item.isVideo)
+                stillImage = item.filePath;
+        }
+    }
+    FileOps::setClipboardFiles(selectedUrls(), FileOps::Op::Copy, stillImage);
 }
 
 void GridView::cutSelection()

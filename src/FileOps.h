@@ -30,7 +30,13 @@ int perform(const QList<QUrl>& urls, const QString& targetDir, Op op,
 // Puts the files on the system clipboard as copy or cut, using the GNOME and
 // KDE conventions so file managers perform the paste (move for cut) — the
 // app itself never deletes anything.
-void setClipboardFiles(const QList<QUrl>& urls, Op op);
+//
+// stillImagePath: when the caller copies exactly one still image, its path
+// enables the additional lazy image formats (see MediaMimeData), so image
+// editors paste the picture. Ignored for Op::Move — pasting pixels while the
+// file is marked for a move would be confusing. Empty = files only.
+void setClipboardFiles(const QList<QUrl>& urls, Op op,
+                       const QString& stillImagePath = QString());
 
 // Reads file URLs and the cut/copy marker (GNOME/KDE/Windows conventions)
 // from the system clipboard. Empty urls = no files on the clipboard.
@@ -44,10 +50,12 @@ ClipboardFiles clipboardFiles();
 // tested without touching the real clipboard.
 // makeClipboardMime returns a newly allocated QMimeData; the caller owns it.
 // The explicit flavor is what lets one binary check both platforms.
-QMimeData* makeClipboardMime(const QList<QUrl>& urls, Op op, Path::Flavor flavor);
-inline QMimeData* makeClipboardMime(const QList<QUrl>& urls, Op op)
+QMimeData* makeClipboardMime(const QList<QUrl>& urls, Op op, Path::Flavor flavor,
+                             const QString& stillImagePath = QString());
+inline QMimeData* makeClipboardMime(const QList<QUrl>& urls, Op op,
+                                    const QString& stillImagePath = QString())
 {
-    return makeClipboardMime(urls, op, Path::flavor());
+    return makeClipboardMime(urls, op, Path::flavor(), stillImagePath);
 }
 Op opFromMime(const QMimeData* mime);
 

@@ -100,6 +100,10 @@ private:
     // Ctrl+press hit test: on the medium, not on the (overlaid) control bar
     bool pressOnMedium(const QPointF& globalPos) const;
     void endPan();     // release the pan grab (also on close / media switch)
+    // End-of-video poster state (see the "End of video" block in the .cpp)
+    void enterVideoEnded();
+    void leaveVideoEnded();
+    void restartVideo();
     void updateGeometry_();    // manual geometry for stack and bar
     void setControlBarVisible(bool visible);
     void onIdleTimeout();      // fullscreen: hides the cursor when idle
@@ -153,6 +157,11 @@ private:
     // updateGeometry_ (0 in fullscreen), colored only while active
     int  m_focusBorderPx     = 0;
     bool m_focusBorderActive = false;
+
+    // Video ended: poster + play badge shown, next play restarts from 0.
+    // m_posterGen invalidates poster extractions that outlive the state.
+    bool m_videoEnded = false;
+    int  m_posterGen  = 0;
 
     // Wheel: one image / one zoom step per 120-unit notch, remainder kept
     int m_navWheelAccum  = 0;

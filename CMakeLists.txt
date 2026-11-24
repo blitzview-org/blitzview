@@ -59,6 +59,7 @@ set(SOURCES
     src/ElidedLabel.cpp
     src/ExifToolService.cpp
     src/FileOps.cpp
+    src/MediaMimeData.cpp
     src/MetadataCache.cpp
     src/Path.cpp
     src/RenameDialog.cpp
@@ -103,6 +104,7 @@ set(HEADERS
     src/ElidedLabel.h
     src/ExifToolService.h
     src/FileOps.h
+    src/MediaMimeData.h
     src/MediaMetadata.h
     src/MetadataCache.h
     src/Path.h
@@ -118,6 +120,7 @@ set(HEADERS
     src/MediaReadGate.h
     src/FullscreenTransition.h
     src/GridDelegate.h
+    src/PlayBadge.h
     src/GridView.h
     src/TableView.h
     src/ImageCanvas.h

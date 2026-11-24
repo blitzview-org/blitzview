@@ -8,6 +8,8 @@
 #include "Shortcuts.h"
 #include "AppSettings.h"
 #include "PageBackground.h"
+#include "PlayBadge.h"
+#include "FfmpegThumbExtractor.h"
 
 #include <QApplication>
 #include <QAudioOutput>
@@ -27,11 +29,13 @@
 #include <QShortcut>
 #include <QSlider>
 #include <QPainterPath>
+#include <QPointer>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTimer>
 #include <QVideoFrame>
 #include <QVideoSink>
+#include <QtConcurrentRun>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
@@ -70,6 +74,15 @@
 // which refits while fitted and only re-clamps while zoomed. Every new
 // medium calls fitToWindow() beforehand, so the first frame of a video is
 // always shown fitted.
+//
+// End of video: the surface keeps the LAST VALID frame (the sink may hand
+// over an invalid frame when playback stops) and, once the viewer has it,
+// shows the POSTER — the same first frame the grid thumbnail was extracted
+// from, at native size — in place of the frame, with the play badge drawn
+// in WIDGET space (a HUD: centred over the visible part of the content,
+// unaffected by zoom/pan, which keep working on the poster). The poster is
+// an ordinary content image: same ViewTransform, orientation already baked
+// in by the extractor (frame layer = identity).
 // ---------------------------------------------------------------------------
 class VideoSurface : public QWidget, public ZoomPanPage
 {
@@ -79,13 +92,54 @@ public:
         setAttribute(Qt::WA_OpaquePaintEvent, true);
         connect(&m_sink, &QVideoSink::videoFrameChanged,
                 this, [this](const QVideoFrame& frame) {
-                    if (frame.isValid())
+                    if (frame.isValid()) {
+                        m_frame = frame;
                         m_view.setContentSize(orientedSize(frame));
+                    }
                     update();
                 });
     }
 
     QVideoSink* sink() { return &m_sink; }
+
+    // New medium: forget the previous clip's last frame and poster so the
+    // gap before the first frame is black, not the old picture
+    void clear()
+    {
+        m_frame = QVideoFrame();
+        m_poster = QImage();
+        m_ended = false;
+        update();
+    }
+
+    // Ended state: draw the play badge; with a poster, show it instead of
+    // the last frame. Leaving the state drops the poster.
+    void setEnded(bool ended)
+    {
+        if (m_ended == ended)
+            return;
+        m_ended = ended;
+        if (!ended)
+            m_poster = QImage();
+        update();
+    }
+    bool ended() const { return m_ended; }
+
+    // Poster = oriented first frame at native size (extractor output). Only
+    // honoured while ended — a late result after a restart is dropped.
+    void setPoster(const QImage& poster)
+    {
+        if (!m_ended || poster.isNull())
+            return;
+        m_poster = poster;
+        m_view.setContentSize(QSizeF(poster.size()));
+        update();
+    }
+    bool hasPoster() const { return !m_poster.isNull(); }
+
+    // Raw (unoriented) size of the last frame — the extractor's target size
+    // for a native-resolution poster; invalid before the first frame
+    QSize frameSize() const { return m_frame.isValid() ? m_frame.size() : QSize(); }
 
     // ZoomPanPage
     QWidget* pageWidget() override { return this; }
@@ -116,9 +170,18 @@ protected:
         QPainter p(this);
         p.fillRect(rect(), Qt::black);
 
-        const QVideoFrame frame = m_sink.videoFrame();
-        if (!frame.isValid())
+        if (m_ended && !m_poster.isNull()) {
+            paintContent(p, m_poster, 0, false);
+            paintBadge(p);
             return;
+        }
+
+        const QVideoFrame frame = m_frame;
+        if (!frame.isValid()) {
+            if (m_ended)
+                paintBadge(p);
+            return;
+        }
 
         // Full-frame conversion, never at the zoomed size: QVideoFrame caches
         // the QImage per frame, so repaints while paused/panning are free
@@ -126,9 +189,17 @@ protected:
         if (img.isNull())
             return;
 
+        paintContent(p, img, static_cast<int>(frame.rotation()), frame.mirrored());
+        if (m_ended)
+            paintBadge(p);
+    }
+
+    // Draws `img` (surface transformation already applied) through the view
+    // transform plus the frame-level orientation (cwDeg / mirrored)
+    void paintContent(QPainter& p, const QImage& img, int cwDeg, bool mirrored)
+    {
         // Normally already current from the sink callback; derived from the
         // actual image here as the safety net for the size convention
-        const int cwDeg = static_cast<int>(frame.rotation());
         const bool quarter = (cwDeg == 90 || cwDeg == 270);
         const QSizeF oriented = quarter ? QSizeF(img.height(), img.width())
                                         : QSizeF(img.size());
@@ -140,7 +211,7 @@ protected:
         orient.translate(oriented.width() / 2.0, oriented.height() / 2.0);
         if (cwDeg != 0)
             orient.rotate(cwDeg);
-        if (frame.mirrored())
+        if (mirrored)
             orient.scale(-1.0, 1.0); // horizontal mirror (front cameras)
         orient.translate(-img.width() / 2.0, -img.height() / 2.0);
 
@@ -152,10 +223,24 @@ protected:
         if (src.isEmpty())
             return;
 
+        p.save();
         p.setRenderHint(QPainter::SmoothPixmapTransform, true);
         p.setTransform(m_view.transform(), true);
         p.setTransform(orient, true);
         p.drawImage(QRectF(src), img, QRectF(src));
+        p.restore();
+    }
+
+    // The play badge as a HUD: widget space, centred on the visible part of
+    // the content, sized from its shorter side like the grid sizes it from
+    // the thumbnail — capped so it does not dominate a full-screen frame
+    void paintBadge(QPainter& p)
+    {
+        QRectF box = m_view.transform().mapRect(QRectF(QPointF(0, 0), m_view.contentSize()))
+                         .intersected(QRectF(rect()));
+        if (box.isEmpty())
+            box = QRectF(rect());
+        drawPlayBadge(&p, box.center(), kBadgeRadius);
     }
 
     void resizeEvent(QResizeEvent* event) override
@@ -175,7 +260,14 @@ private:
         return (deg % 180 == 90) ? QSizeF(s.height(), s.width()) : QSizeF(s);
     }
 
+    // Badge radius (logical px): a fixed 128 px disc like common players,
+    // independent of frame size and zoom
+    static constexpr qreal kBadgeRadius = 64;
+
     QVideoSink    m_sink;
+    QVideoFrame   m_frame;    // last valid frame (kept across stop/end)
+    QImage        m_poster;   // end-of-video poster, see setPoster()
+    bool          m_ended = false;
     ViewTransform m_view;
 };
 
@@ -596,6 +688,11 @@ MediaViewer::MediaViewer(QWidget* parent)
             [this](QMediaPlayer::PlaybackState state) {
         m_btnPlayPause->setText(state == QMediaPlayer::PlayingState ? tr("⏸") : tr("▶"));
     });
+    connect(m_player, &QMediaPlayer::mediaStatusChanged, this,
+            [this](QMediaPlayer::MediaStatus status) {
+        if (status == QMediaPlayer::EndOfMedia)
+            enterVideoEnded();
+    });
 
 }
 
@@ -640,11 +737,15 @@ void MediaViewer::loadCurrent()
     if (isVideo) {
         m_stack->setCurrentWidget(m_videoPage);
         endPan();
-        if (m_videoSurface)
+        leaveVideoEnded();
+        if (m_videoSurface) {
+            m_videoSurface->clear();         // no stale frame/poster from the previous clip
             m_videoSurface->fitToWindow();   // every video opens fitted (first frame refits)
+        }
         m_player->setSource(QUrl::fromLocalFile(item.filePath));
         m_player->play();
     } else {
+        leaveVideoEnded();
         m_player->stop();
         m_player->setSource(QUrl());
         m_stack->setCurrentWidget(m_canvas);
@@ -814,10 +915,76 @@ bool MediaViewer::pressOnMedium(const QPointF& globalPos) const
 
 void MediaViewer::onPlayPause()
 {
+    if (m_videoEnded) {
+        restartVideo();
+        return;
+    }
     if (m_player->playbackState() == QMediaPlayer::PlayingState)
         m_player->pause();
     else
         m_player->play();
+}
+
+// --- End of video -------------------------------------------------------------
+//
+// At EndOfMedia the surface switches to the POSTER: the first frame of the
+// clip — the same source frame the grid thumbnail is extracted from (see
+// FfmpegThumbExtractor: cover art if attached, else the first decoded
+// frame) — at the clip's native resolution, with the shared play badge on
+// top. The frame is extracted on a worker thread (one decoded frame, tens of
+// ms); until it arrives, and if it never does, the surface keeps the last
+// frame and still shows the badge. A generation counter drops results that
+// arrive after a restart or a media switch; the surface also refuses posters
+// once it has left the ended state.
+//
+// Restart = Space, the bar's play button, or a plain left click on the
+// medium (Ctrl+drag remains pan). Playback resumes from position 0 and the
+// badge disappears with the first new frame.
+
+void MediaViewer::enterVideoEnded()
+{
+    if (m_videoEnded || !m_videoSurface)
+        return;
+    m_videoEnded = true;
+    m_videoSurface->setEnded(true);
+
+    const QString path = currentFilePath();
+    const QSize native = m_videoSurface->frameSize();
+    TRACE_SLIDE("video ended poster=%s native=%dx%d", qPrintable(path),
+                native.width(), native.height());
+    if (path.isEmpty() || !native.isValid())
+        return;
+
+    const int gen = ++m_posterGen;
+    QPointer<MediaViewer> self(this);
+    (void)QtConcurrent::run([self, path, native, gen]() {
+        // Target = raw frame size, so the extractor's aspect fit is 1:1
+        const QImage poster = extractVideoThumbnail(path, native);
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [self, poster, gen]() {
+            if (!self || gen != self->m_posterGen || !self->m_videoEnded)
+                return;
+            TRACE_SLIDE("video poster ready %dx%d", poster.width(), poster.height());
+            self->m_videoSurface->setPoster(poster);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MediaViewer::leaveVideoEnded()
+{
+    ++m_posterGen;   // invalidate an in-flight extraction
+    if (!m_videoEnded)
+        return;
+    m_videoEnded = false;
+    if (m_videoSurface)
+        m_videoSurface->setEnded(false);
+}
+
+void MediaViewer::restartVideo()
+{
+    TRACE_SLIDE("video restart");
+    leaveVideoEnded();
+    m_player->setPosition(0);
+    m_player->play();
 }
 
 void MediaViewer::onMuteToggle()
@@ -829,6 +996,8 @@ void MediaViewer::onMuteToggle()
 
 void MediaViewer::onSeek(int value)
 {
+    // Seeking in the ended state shows the sought frame, not the poster
+    leaveVideoEnded();
     m_player->setPosition(static_cast<qint64>(value));
 }
 
@@ -1090,6 +1259,15 @@ void MediaViewer::mousePressEvent(QMouseEvent* event)
         event->accept();
         return;
     }
+    // Plain left click on the ended video's poster: play again. Edge zones
+    // consume their own plain presses (navigation), the bar its own.
+    if (event->button() == Qt::LeftButton && m_videoEnded
+        && !(event->modifiers() & Qt::ControlModifier)
+        && pressOnMedium(event->globalPosition())) {
+        restartVideo();
+        event->accept();
+        return;
+    }
     QWidget::mousePressEvent(event);
 }
 
@@ -1158,6 +1336,7 @@ void MediaViewer::closeEvent(QCloseEvent* event)
     // Persistent window, only hidden on close — stop playback explicitly.
     // Also leave fullscreen so the next open starts windowed.
     m_player->stop();
+    leaveVideoEnded();
     m_idleTimer->stop();
     endPan();
     // Never carry the presentation-mode flag into a later windowed open of

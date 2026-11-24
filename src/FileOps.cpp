@@ -1,4 +1,5 @@
 #include "FileOps.h"
+#include "MediaMimeData.h"
 
 #include "Path.h"
 
@@ -136,11 +137,15 @@ int perform(const QList<QUrl>& urls, const QString& targetDir, Op op,
     return transferred;
 }
 
-QMimeData* makeClipboardMime(const QList<QUrl>& urls, Op op, Path::Flavor flavor)
+QMimeData* makeClipboardMime(const QList<QUrl>& urls, Op op, Path::Flavor flavor,
+                             const QString& stillImagePath)
 {
     const bool cut = (op == Op::Move);
 
-    auto* mime = new QMimeData;
+    // Image formats only for a single copied still image, never for a cut.
+    // The decode happens lazily inside MediaMimeData when a consumer asks.
+    const bool offerImage = !cut && urls.size() == 1 && !stillImagePath.isEmpty();
+    auto* mime = new MediaMimeData(offerImage ? stillImagePath : QString());
     mime->setUrls(urls);
 
     // GNOME/Nautilus convention: first line "cut"/"copy", then the URIs.
@@ -172,12 +177,13 @@ QMimeData* makeClipboardMime(const QList<QUrl>& urls, Op op, Path::Flavor flavor
     return mime;
 }
 
-void setClipboardFiles(const QList<QUrl>& urls, Op op)
+void setClipboardFiles(const QList<QUrl>& urls, Op op, const QString& stillImagePath)
 {
     if (urls.isEmpty())
         return;
 
-    QGuiApplication::clipboard()->setMimeData(makeClipboardMime(urls, op)); // takes ownership
+    QGuiApplication::clipboard()->setMimeData(
+        makeClipboardMime(urls, op, stillImagePath)); // takes ownership
 }
 
 Op opFromMime(const QMimeData* mime)
