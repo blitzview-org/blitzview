@@ -75,6 +75,7 @@ set(SOURCES
     src/MediaContextMenu.cpp
     src/PaddedListProxy.cpp
     src/ImageCanvas.cpp
+    src/ViewTransform.cpp
     src/MediaViewer.cpp
     src/ExifThumbExtractor.cpp
     src/FfmpegThumbExtractor.cpp
@@ -120,6 +121,7 @@ set(HEADERS
     src/GridView.h
     src/TableView.h
     src/ImageCanvas.h
+    src/ViewTransform.h
     src/MediaViewer.h
     src/ExifThumbExtractor.h
     src/FfmpegThumbExtractor.h

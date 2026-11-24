@@ -19,6 +19,7 @@ class QTimer;
 class VideoSurface;
 class EdgeNavZone;
 class ImageCanvas;
+class ZoomPanPage;
 
 // Unified single-media view for images AND videos. No overlays: the control
 // bar occupies a bottom strip in both modes (manual geometry, no QLayout).
@@ -30,7 +31,8 @@ class ImageCanvas;
 // images and videos switches the stacked page.
 //
 // Video renders via the CPU-painting VideoSurface (verified pixel-correct,
-// handles rotation/mirroring; HW decoding still applies). The GL path
+// handles rotation/mirroring; HW decoding still applies) and shares the
+// image page's cursor-anchored zoom / drag pan through ViewTransform. The GL path
 // (QGraphicsVideoItem on a QOpenGLWidget viewport, Gwenview-style) is kept
 // behind BLITZVIEW_VIDEO_GL=1 but renders BLACK in Qt 6.11 — retest with
 // future Qt versions before making it the default.
@@ -64,8 +66,8 @@ signals:
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
-    // Wheel and mouse input for the image page arrive HERE: the canvas and
-    // the edge zones (Ctrl held) ignore them, so they propagate to the viewer
+    // Wheel and mouse input for the image/video page arrive HERE: the pages
+    // and the edge zones (Ctrl held) ignore them, so they propagate to the viewer
     void wheelEvent(QWheelEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -90,7 +92,14 @@ private slots:
 private:
     void loadCurrent();
     bool isImagePage() const;
-    void endPan();     // release the pan grab (also on close / image switch)
+    // The page whose zoom/pan state the input handlers drive: the canvas
+    // (with an image) or the video surface (once a frame is known); nullptr
+    // otherwise (no media, load failure, GL video path)
+    ZoomPanPage* zoomPage() const;
+    const char* zoomTraceTag() const;   // "viewer" (image) / "video"
+    // Ctrl+press hit test: on the medium, not on the (overlaid) control bar
+    bool pressOnMedium(const QPointF& globalPos) const;
+    void endPan();     // release the pan grab (also on close / media switch)
     void updateGeometry_();    // manual geometry for stack and bar
     void setControlBarVisible(bool visible);
     void onIdleTimeout();      // fullscreen: hides the cursor when idle
@@ -149,7 +158,7 @@ private:
     int m_navWheelAccum  = 0;
     int m_zoomWheelAccum = 0;
 
-    // Ctrl+left press on the image page: becomes a PAN once the cursor
+    // Ctrl+left press on the medium: becomes a PAN once the cursor
     // moves past QApplication::startDragDistance(); a release before that
     // does nothing (same decision rule as the grid's Ctrl-click vs Ctrl-drag)
     bool    m_ctrlPressPending = false;

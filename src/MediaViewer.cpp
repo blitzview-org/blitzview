@@ -3,6 +3,7 @@
 
 #include "ImageCanvas.h"
 #include "SlideTrace.h"
+#include "ViewTransform.h"
 
 #include "Shortcuts.h"
 #include "AppSettings.h"
@@ -41,18 +42,73 @@
 // handling rotation/mirroring manually via painter transforms. Verified
 // pixel-correct against ffmpeg's autorotated reference; the default video
 // page (see header for the experimental GL alternative).
+//
+// Two orientation layers (QVideoFrame docs): the SURFACE transformation
+// (QVideoFrameFormat rotation/mirror — the file's rotation metadata) is
+// baked into toImage(), which returns the already-rotated image (verified:
+// a 320x240 clip with a 90° display matrix yields a 240x320 QImage and
+// frame.rotation() == 0). The FRAME transformation (QVideoFrame::rotation()
+// / mirrored(), camera frames) is "for presentation only" and must be
+// applied by the painter, rotation before mirroring.
+//
+// Zoom/pan: the same ViewTransform as the image page, in ORIENTED space —
+// the content size is the frame size after BOTH layers (a 1920x1080 frame
+// with 90° rotation is 1080x1920 content; mirroring does not change the
+// size). Painter chain in code order:
+//   translate(origin) · scale(s)            — ViewTransform: oriented px -> widget
+//   translate(W_o/2, H_o/2)                 — centre of the oriented box
+//   rotate(frameRot) · [scale(-1, 1)]       — the frame-level orientation
+//   translate(-w/2, -h/2); drawImage(src)   — toImage() result, centred
+// Read backwards for what happens to the image: mirrored in its own pixel
+// grid, rotated clockwise about its centre (a w×h image becomes the h×w
+// oriented box), moved so the oriented box's top-left is (0,0), then scaled
+// and placed by the view transform. For file playback the frame layer is
+// the identity, so the chain reduces to the view transform.
+//
+// The frame size is unknown until the first frame arrives and may change
+// (new medium, resolution switch): the sink callback feeds it to the view,
+// which refits while fitted and only re-clamps while zoomed. Every new
+// medium calls fitToWindow() beforehand, so the first frame of a video is
+// always shown fitted.
 // ---------------------------------------------------------------------------
-class VideoSurface : public QWidget
+class VideoSurface : public QWidget, public ZoomPanPage
 {
 public:
     explicit VideoSurface(QWidget* parent) : QWidget(parent)
     {
         setAttribute(Qt::WA_OpaquePaintEvent, true);
         connect(&m_sink, &QVideoSink::videoFrameChanged,
-                this, qOverload<>(&QWidget::update));
+                this, [this](const QVideoFrame& frame) {
+                    if (frame.isValid())
+                        m_view.setContentSize(orientedSize(frame));
+                    update();
+                });
     }
 
     QVideoSink* sink() { return &m_sink; }
+
+    // ZoomPanPage
+    QWidget* pageWidget() override { return this; }
+    const ViewTransform& view() const override { return m_view; }
+    void fitToWindow() override
+    {
+        m_view.fit();
+        update();
+    }
+    bool zoomAt(const QPointF& cursor, double factor) override
+    {
+        const ViewTransform::ZoomStep step = m_view.zoomAt(cursor, factor);
+        if (!step.changed)
+            return false;
+        ViewTransform::traceZoomStep("video", cursor, step, m_view);
+        update();
+        return true;
+    }
+    void panBy(const QPointF& delta) override
+    {
+        if (m_view.panBy(delta))
+            update();
+    }
 
 protected:
     void paintEvent(QPaintEvent*) override
@@ -64,35 +120,63 @@ protected:
         if (!frame.isValid())
             return;
 
-        const QImage img = frame.toImage(); // unrotated, unmirrored
+        // Full-frame conversion, never at the zoomed size: QVideoFrame caches
+        // the QImage per frame, so repaints while paused/panning are free
+        const QImage img = frame.toImage(); // surface transformation applied
         if (img.isNull())
             return;
 
+        // Normally already current from the sink callback; derived from the
+        // actual image here as the safety net for the size convention
         const int cwDeg = static_cast<int>(frame.rotation());
         const bool quarter = (cwDeg == 90 || cwDeg == 270);
+        const QSizeF oriented = quarter ? QSizeF(img.height(), img.width())
+                                        : QSizeF(img.size());
+        if (oriented != m_view.contentSize())
+            m_view.setContentSize(oriented);
 
-        // Fit the DISPLAY size (post-rotation) into the widget
-        QSizeF display = quarter ? QSizeF(img.height(), img.width())
-                                 : QSizeF(img.size());
-        display.scale(QSizeF(size()), Qt::KeepAspectRatio);
+        // Oriented box -> toImage() pixels (see class comment for the order)
+        QTransform orient;
+        orient.translate(oriented.width() / 2.0, oriented.height() / 2.0);
+        if (cwDeg != 0)
+            orient.rotate(cwDeg);
+        if (frame.mirrored())
+            orient.scale(-1.0, 1.0); // horizontal mirror (front cameras)
+        orient.translate(-img.width() / 2.0, -img.height() / 2.0);
 
-        // Draw the unrotated image through the rotation transform: its
-        // width/height swap back for quarter rotations
-        const QSizeF draw = quarter ? display.transposed() : display;
+        // Only the visible part of the frame is drawn: visible oriented rect
+        // mapped back into frame pixels, expanded to whole pixels
+        const QRectF visibleFrame = orient.inverted().mapRect(m_view.visibleContentRect());
+        const QRect src = visibleFrame.intersected(QRectF(img.rect()))
+                              .toAlignedRect().intersected(img.rect());
+        if (src.isEmpty())
+            return;
 
         p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        p.translate(width() / 2.0, height() / 2.0);
-        if (cwDeg != 0)
-            p.rotate(cwDeg);
-        if (frame.mirrored())
-            p.scale(-1.0, 1.0); // horizontal mirror (front cameras)
-        p.drawImage(QRectF(-draw.width() / 2.0, -draw.height() / 2.0,
-                           draw.width(), draw.height()),
-                    img);
+        p.setTransform(m_view.transform(), true);
+        p.setTransform(orient, true);
+        p.drawImage(QRectF(src), img, QRectF(src));
+    }
+
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QWidget::resizeEvent(event);
+        m_view.setViewportSize(size());
     }
 
 private:
-    QVideoSink m_sink;
+    // Frame size after both orientation layers (what the viewer shows), in
+    // frame pixels — computable before toImage(), from the raw frame size
+    static QSizeF orientedSize(const QVideoFrame& frame)
+    {
+        const int deg = static_cast<int>(frame.surfaceFormat().rotation())
+                      + static_cast<int>(frame.rotation());
+        const QSize s = frame.size();
+        return (deg % 180 == 90) ? QSizeF(s.height(), s.width()) : QSizeF(s);
+    }
+
+    QVideoSink    m_sink;
+    ViewTransform m_view;
 };
 
 // ---------------------------------------------------------------------------
@@ -464,8 +548,9 @@ MediaViewer::MediaViewer(QWidget* parent)
     m_edgeRight->onClick = [this]() { showNext(); };
     // Ctrl+press over a zone is a PAN grab, not a navigation click: the zone
     // ignores it and the event propagates to the viewer's mousePressEvent
-    m_edgeLeft->ignoreCtrlPress  = [this]() { return isImagePage(); };
-    m_edgeRight->ignoreCtrlPress = [this]() { return isImagePage(); };
+    // (image and video page alike; not on the GL video path)
+    m_edgeLeft->ignoreCtrlPress  = [this]() { return zoomPage() != nullptr; };
+    m_edgeRight->ignoreCtrlPress = [this]() { return zoomPage() != nullptr; };
     // The zones sit over the media pages, so the fullscreen mouse logic
     // (cursor un-hide, bottom bar zone) must also see their moves
     m_edgeLeft->installEventFilter(this);
@@ -554,6 +639,9 @@ void MediaViewer::loadCurrent()
 
     if (isVideo) {
         m_stack->setCurrentWidget(m_videoPage);
+        endPan();
+        if (m_videoSurface)
+            m_videoSurface->fitToWindow();   // every video opens fitted (first frame refits)
         m_player->setSource(QUrl::fromLocalFile(item.filePath));
         m_player->play();
     } else {
@@ -666,16 +754,35 @@ void MediaViewer::showNext()
     }
 }
 
-// --- Image zoom / pan ---------------------------------------------------------
+// --- Zoom / pan (image and video page) ----------------------------------------
 
 bool MediaViewer::isImagePage() const
 {
     return !m_items.isEmpty() && !m_items.at(m_current).isVideo;
 }
 
+ZoomPanPage* MediaViewer::zoomPage() const
+{
+    if (m_items.isEmpty())
+        return nullptr;
+    if (isImagePage())
+        return m_canvas->hasImage() ? m_canvas : nullptr;
+    // Video: only the painting surface knows its frame size; the GL path has
+    // no zoom. Before the first frame arrives there is nothing to anchor on.
+    if (m_videoSurface && m_videoSurface->view().hasContent())
+        return m_videoSurface;
+    return nullptr;
+}
+
+const char* MediaViewer::zoomTraceTag() const
+{
+    return isImagePage() ? "viewer" : "video";
+}
+
 void MediaViewer::fitToWindow()
 {
-    m_canvas->fitToWindow();
+    if (ZoomPanPage* page = zoomPage())
+        page->fitToWindow();
 }
 
 void MediaViewer::endPan()
@@ -685,8 +792,22 @@ void MediaViewer::endPan()
         return;
     m_panActive = false;
     QGuiApplication::restoreOverrideCursor();
-    TRACE_SLIDE("viewer pan stop origin=(%.1f,%.1f)",
-                m_canvas->origin().x(), m_canvas->origin().y());
+    if (ZoomPanPage* page = zoomPage())
+        TRACE_SLIDE("%s pan stop origin=(%.1f,%.1f)", zoomTraceTag(),
+                    page->view().origin().x(), page->view().origin().y());
+}
+
+bool MediaViewer::pressOnMedium(const QPointF& globalPos) const
+{
+    // The press must land on the medium (page or edge zone), not on the
+    // control bar — in fullscreen the bar overlays the medium's bottom strip,
+    // and a Ctrl+press on its background would otherwise start a pan
+    const QPoint local = mapFromGlobal(globalPos.toPoint());
+    if (!m_stack->geometry().contains(local))
+        return false;
+    if (m_controlBar->isVisible() && m_controlBar->geometry().contains(local))
+        return false;
+    return true;
 }
 
 // --- Video controls ----------------------------------------------------------
@@ -902,8 +1023,7 @@ void MediaViewer::keyPressEvent(QKeyEvent* event)
             onPlayPause();
         break;
     case Qt::Key_F:
-        if (!m_items.isEmpty() && !m_items.at(m_current).isVideo)
-            fitToWindow();
+        fitToWindow();
         break;
     case Qt::Key_F11:    toggleFullscreen(); break;
     default: QWidget::keyPressEvent(event);
@@ -933,16 +1053,17 @@ void MediaViewer::wheelEvent(QWheelEvent* event)
     event->accept();
 
     if (event->modifiers() & Qt::ControlModifier) {
-        if (!isImagePage() || !m_canvas->hasImage())
-            return;                                 // video: no zoom (yet)
+        ZoomPanPage* page = zoomPage();
+        if (!page)
+            return;                                 // nothing to zoom (yet)
         m_zoomWheelAccum += delta;
         const int steps = m_zoomWheelAccum / 120;
         m_zoomWheelAccum -= steps * 120;
         if (steps == 0)
             return;
-        const QPointF cursor = m_canvas->mapFromGlobal(event->globalPosition());
+        const QPointF cursor = page->pageWidget()->mapFromGlobal(event->globalPosition());
         const double factor = std::pow(kViewerZoomStepFactor, steps);
-        m_canvas->zoomAt(cursor, factor);
+        page->zoomAt(cursor, factor);
         return;
     }
 
@@ -957,13 +1078,13 @@ void MediaViewer::wheelEvent(QWheelEvent* event)
 
 void MediaViewer::mousePressEvent(QMouseEvent* event)
 {
-    // Ctrl+left on the image page (canvas or edge zone, which ignores the
+    // Ctrl+left on the medium (page or edge zone, which ignores the
     // Ctrl+press on purpose): arm a pan — decided in mouseMoveEvent once the
     // cursor has moved past startDragDistance; a release before that does
     // nothing. Same rule as the grid's Ctrl-click vs Ctrl-drag.
     if (event->button() == Qt::LeftButton
         && (event->modifiers() & Qt::ControlModifier)
-        && isImagePage() && m_canvas->hasImage()) {
+        && zoomPage() && pressOnMedium(event->globalPosition())) {
         m_ctrlPressPending = true;
         m_pressGlobal = event->globalPosition();
         event->accept();
@@ -974,7 +1095,8 @@ void MediaViewer::mousePressEvent(QMouseEvent* event)
 
 void MediaViewer::mouseMoveEvent(QMouseEvent* event)
 {
-    if (m_ctrlPressPending && (event->buttons() & Qt::LeftButton)) {
+    ZoomPanPage* page = m_ctrlPressPending ? zoomPage() : nullptr;
+    if (page && (event->buttons() & Qt::LeftButton)) {
         const QPointF g = event->globalPosition();
         if (!m_panActive
             && (g - m_pressGlobal).manhattanLength()
@@ -982,14 +1104,14 @@ void MediaViewer::mouseMoveEvent(QMouseEvent* event)
             m_panActive = true;
             m_panLastGlobal = m_pressGlobal;   // no jump: count from the press point
             QGuiApplication::setOverrideCursor(Qt::ClosedHandCursor);
-            TRACE_SLIDE("viewer pan start press=(%.1f,%.1f) origin=(%.1f,%.1f)",
-                        m_pressGlobal.x(), m_pressGlobal.y(),
-                        m_canvas->origin().x(), m_canvas->origin().y());
+            TRACE_SLIDE("%s pan start press=(%.1f,%.1f) origin=(%.1f,%.1f)",
+                        zoomTraceTag(), m_pressGlobal.x(), m_pressGlobal.y(),
+                        page->view().origin().x(), page->view().origin().y());
         }
         if (m_panActive) {
             // 1:1 with the RAW mouse, not with the clamped result: a drag
             // past the edge keeps tracking the real cursor
-            m_canvas->panBy(g - m_panLastGlobal);
+            page->panBy(g - m_panLastGlobal);
             m_panLastGlobal = g;
         }
         event->accept();
