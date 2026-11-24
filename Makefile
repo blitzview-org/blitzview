@@ -20,7 +20,7 @@ BUILD_IMAGE ?= blitzview-build
 # via BLITZVIEW_IDENTITY. Falls back to "Unknown" if it is not there yet.
 identity = $(shell cat $(1)/generated/identity.txt 2>/dev/null || echo Unknown)
 
-.PHONY: help build release clean \
+.PHONY: help build release install uninstall deinstall clean \
         build-image build-image-force \
         windows windows-deploy windows-portable windows-clean \
         linux linux-deploy linux-portable linux-clean \
@@ -41,6 +41,23 @@ build: ## Configure ./build/$(TYPE) and compile BlitzView (TYPE=Debug default)
 
 release: ## Same as 'make build' with TYPE=Release (asserts off, fast)
 	@$(MAKE) build BUILD_TYPE=Release
+
+# System-wide install (Linux only, see CMakeLists.txt). Builds Release first,
+# since a dev build is not what should end up on the system. Respects
+# DESTDIR/PREFIX the usual way, e.g. `make install PREFIX=/usr DESTDIR=/tmp/pkg`.
+PREFIX ?= /usr/local
+
+install: release ## Install blitzview system-wide (Linux; PREFIX=/usr/local default)
+	cmake --install build/release --prefix $(PREFIX)
+
+uninstall: ## Remove the files listed in build/release/install_manifest.txt
+	@if [ -f build/release/install_manifest.txt ]; then \
+	    xargs rm -f < build/release/install_manifest.txt; \
+	else \
+	    echo "No build/release/install_manifest.txt -- run 'make install' first"; \
+	fi
+
+deinstall: uninstall ## Alias for 'uninstall'
 
 clean: ## Remove the ./build directory
 	rm -rf build
