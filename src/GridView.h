@@ -270,6 +270,15 @@ private:
     // edge — see the comment in the implementation.
     FlowParams paintedPinFlow(QPointF* offOut) const;
     void renormPinFlow(FlowParams& f) const;
+    // Pin point relative to the pinned CELL's top-left for a given (lerped)
+    // icon size: the fixed chrome offset (GridDelegate::thumbInsetX/PadTop,
+    // does not scale) plus the in-THUMB fraction m_zoomPinFrac scaled by
+    // the icon size. The single formula behind every pin projection — the
+    // reference is kept in thumb coordinates because the cell's label/pad
+    // strip does not zoom, so a CELL fraction would hit a different image
+    // point at every zoom level (the pin visibly drifted vertically).
+    QPointF pinOffset(qreal iconSize) const;
+    QPointF pinOffset(const FlowParams& f) const { return pinOffset(f.iconSize); }
     // Re-resolve the pin as the item/in-cell point under `pt` on the
     // PAINTED plane — every wheel step (the zoom center follows the
     // mouse) and every pan (re-)grab (the grab point is wherever the
@@ -427,8 +436,8 @@ private:
     int                    m_zoomTargetCols = 1;  // stepped by the wheel
     // Pinned variant (focus frame at gesture start): the raster is LIVE
     // and the painted flow is anchored AT THE PINNED ITEM (see
-    // pinRelativeFlow), so its in-cell pin point (m_zoomPinFrac, 0..1) is
-    // painted EXACTLY at the pin position in every animation frame —
+    // pinRelativeFlow), so its in-THUMB pin point (m_zoomPinFrac, see
+    // pinOffset) is painted EXACTLY at the pin position in every frame —
     // items before it fold backward, items after it forward, the pinned
     // image only scales in place. Steps lerp Flow/PinPoint From→To on
     // the shared reflow clock; the release settle is one more pin
@@ -450,6 +459,11 @@ private:
     // the delta must keep tracking the real cursor 1:1.
     QPointF                m_zoomPanLastMouse;
     int                    m_zoomPinItem = -1;
+    // Pin point as a fraction of the pinned item's THUMB area (0..1 inside
+    // the image; deliberately UNCLAMPED — a cursor over the label, the
+    // padding, a leading dummy cell or past the list end is expressed
+    // relative to the nearest real item, so the projection stays
+    // geometrically consistent instead of snapping to a cell edge)
     QPointF                m_zoomPinFrac;
     FlowParams             m_zoomPinFlowFrom;
     FlowParams             m_zoomPinFlowTo;

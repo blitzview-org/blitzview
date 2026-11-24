@@ -494,11 +494,15 @@ void GridView::beginZoomGesture(bool pinFallbackNearest)
         // Frame from a Details/viewer window: adopt it as the (frozen)
         // hover so it survives the gesture like a mouse-hover frame
         m_hoverIndex = pin;
-        // Pin fraction: the exact in-cell point under the cursor if the
-        // cursor is on the framed item's cell, its CENTER otherwise — the
-        // frame is then MOVED to the cursor by the first step's reflow.
-        // A settle carry keeps the previous fraction (same item, and its
-        // cell has moved off the raster position).
+        // Pin fraction: the exact in-THUMB point under the cursor if the
+        // cursor is on the framed item's cell (unclamped — over the label
+        // or padding it is just outside [0,1]), the thumb CENTER otherwise
+        // — the frame is then MOVED to the cursor by the first step's
+        // reflow. Measured against the thumb, not the cell: the label/pad
+        // chrome does not scale, so only a thumb fraction names the same
+        // IMAGE point at every zoom level. A settle carry keeps the
+        // previous fraction (same item, and its cell has moved off the
+        // raster position).
         const QPointF m(viewport()->mapFromGlobal(QCursor::pos()));
         const QSizeF cs(m_zoomBaseLayout.cell);
         const int cols = qMax(1, m_zoomBaseLayout.cols);
@@ -506,10 +510,10 @@ void GridView::beginZoomGesture(bool pinFallbackNearest)
         const QPointF tl((vi % cols) * cs.width(),
                          (vi / cols - m_zoomBaseLayout.firstRow) * cs.height());
         if (!carryPin) {
+            const qreal icon = qMax(1, m_zoomBaseIconSize);
             m_zoomPinFrac = QRectF(tl, cs).contains(m)
-                    && cs.width() > 0 && cs.height() > 0
-                ? QPointF((m.x() - tl.x()) / cs.width(),
-                          (m.y() - tl.y()) / cs.height())
+                ? QPointF((m.x() - tl.x() - GridDelegate::thumbInsetX()) / icon,
+                          (m.y() - tl.y() - GridDelegate::thumbPadTop()) / icon)
                 : QPointF(0.5, 0.5);
         }
         // Resting pin state: the base raster anchored at the pinned item,
@@ -519,8 +523,7 @@ void GridView::beginZoomGesture(bool pinFallbackNearest)
             pinRelativeFlow(m_zoomBaseLayout, m_zoomBaseIconSize, pin);
         m_zoomPinPointFrom = m_zoomPinPointTo = carryPin
             ? carryPoint
-            : tl + QPointF(m_zoomPinFrac.x() * cs.width(),
-                           m_zoomPinFrac.y() * cs.height());
+            : tl + pinOffset(m_zoomBaseIconSize);
         emitFocusChange();
     }
 
@@ -612,6 +615,12 @@ void GridView::updatePinnedZoomStep()
     TRACE_SLIDE("zoom step targetCols=%d realCols=%d eff=%d vpW=%d",
                 m_zoomTargetCols, columns(), eff,
                 viewport()->width());
+    // The pin contract in one line: with a fixed cursor, item and fraction
+    // must stay constant across steps while icon/cell grow
+    TRACE_SLIDE("zoom pin m=(%.1f,%.1f) item=%d frac=(%.3f,%.3f) icon=%d "
+                "cell=%dx%d",
+                m.x(), m.y(), itemIdx, m_zoomPinFrac.x(), m_zoomPinFrac.y(),
+                eff, csT.width(), csT.height());
 
     // Re-syncs the maximum AND the mirrored handle position (blocked, no
     // retrigger); persist explicitly — the new zoom must survive a restart
@@ -626,7 +635,7 @@ void GridView::updatePinnedZoomStep()
     // residual as whitespace. The raster's own column only matters for
     // the release settle, which re-anchors basePx via pinRelativeFlow.
     m_zoomPinFlowTo = pinRelativeFlow(currentLayoutParams(), eff, itemIdx);
-    m_zoomPinFlowTo.basePx = (m.x() - m_zoomPinFrac.x() * csT.width())
+    m_zoomPinFlowTo.basePx = (m.x() - pinOffset(eff).x())
         - qreal(itemIdx) * csT.width();
     // Mouse in the right-edge whitespace puts Xpoint past the fold —
     // normalize so the step animation cannot cross a fold row
@@ -651,14 +660,24 @@ void GridView::updatePinnedZoomStep()
 // made the image jump columns on release). Only whole dummy ROWS are
 // avoided: a vertical underflow clamps to row 0 and the image drifts up
 // with the settle instead.
+// The pin fraction is unclamped (see m_zoomPinFrac), so the pinned cell's
+// nearest screen column may fall outside [0, cols): that is simply the
+// same cell one fold row over, and it is wrapped there (the fold is
+// cols·cellW wide, one row per period) instead of being clamped to the
+// edge column — a clamp would displace the raster by up to a row width
+// and the settle would then slide the whole block back.
 void GridView::anchorPinnedRaster(const QPointF& pt, int itemIdx)
 {
     const int newCols = qMax(1, columns());
     const QSize csT = cellSize();
-    const qreal txT = pt.x() - m_zoomPinFrac.x() * csT.width();
-    const qreal tyT = pt.y() - m_zoomPinFrac.y() * csT.height();
-    const int col = qBound(0, qRound(txT / qMax(1, csT.width())), newCols - 1);
-    const int screenRow = qRound(tyT / qMax(1, csT.height()));
+    const QPointF off = pinOffset(m_iconSize);
+    const qreal txT = pt.x() - off.x();
+    const qreal tyT = pt.y() - off.y();
+    int col = qRound(txT / qMax(1, csT.width()));
+    int screenRow = qRound(tyT / qMax(1, csT.height()));
+    const int wrap = int(std::floor(qreal(col) / newCols));
+    col -= wrap * newCols;
+    screenRow += wrap;
     const int gridOffset = ((col - itemIdx) % newCols + newCols) % newCols;
     const int firstRow =
         qMax(0, (itemIdx + gridOffset) / newCols - screenRow);
@@ -738,7 +757,7 @@ void GridView::renormPinFlow(FlowParams& f) const
 {
     const qreal w = qMax(1.0, f.foldW);
     const qreal Xp =
-        (qreal(m_zoomPinItem) + m_zoomPinFrac.x()) * f.cellW + f.basePx;
+        qreal(m_zoomPinItem) * f.cellW + pinOffset(f).x() + f.basePx;
     f.basePx -= std::floor(Xp / w) * w;
 }
 
@@ -751,19 +770,20 @@ GridView::FlowParams GridView::paintedPinFlow(QPointF* offOut) const
     if (offOut) {
         const QPointF pinPt = m_zoomPinPointFrom
             + (m_zoomPinPointTo - m_zoomPinPointFrom) * t;
+        const QPointF po = pinOffset(f);
         const qreal Xpoint =
-            (qreal(m_zoomPinItem) + m_zoomPinFrac.x()) * f.cellW + f.basePx;
+            qreal(m_zoomPinItem) * f.cellW + po.x() + f.basePx;
         const qreal rowVis = std::floor(Xpoint / qMax(1.0, f.foldW));
         *offOut = pinPt
             - QPointF(Xpoint - rowVis * f.foldW,
-                      (rowVis + m_zoomPinFrac.y()) * f.cellH);
+                      rowVis * f.cellH + po.y());
     }
     return f;
 }
 
-// Re-resolve the pin as the item/in-cell point under `pt` on the PAINTED
+// Re-resolve the pin as the item/in-thumb point under `pt` on the PAINTED
 // plane: invert the painted flow (translation off, fold rows, strip
-// position → item + in-cell fraction). Jumpless by construction — the
+// position → item + in-thumb fraction). Jumpless by construction — the
 // flow definition is item-independent, only the pin reference (item,
 // frac, points) changes, and the new pin point's painted position is
 // `pt` itself; From==To leaves a still-running step animation painting
@@ -771,6 +791,12 @@ GridView::FlowParams GridView::paintedPinFlow(QPointF* offOut) const
 // by every wheel step (the zoom center follows the mouse) and by every
 // pan (re-)grab (the grab point is wherever the button goes down — NOT
 // the point of the original grab; the plane must not jump on a re-grab).
+// The ITEM is clamped into the list (a dummy cell before item 0 or the
+// space past the last item has no item of its own), the FRACTION is not:
+// it is measured from the clamped item's thumb and may be negative or
+// exceed 1 by whole cells. Clamping the fraction too (an earlier version)
+// snapped the pin to the edge of item 0 / the last item — the plane then
+// jumped by the clamped distance on the next step.
 void GridView::resolvePinAt(const QPointF& pt, bool moveFocus)
 {
     if (!m_sourceModel || m_sourceModel->rowCount() <= 0)
@@ -781,11 +807,14 @@ void GridView::resolvePinAt(const QPointF& pt, bool moveFocus)
     const QPointF fp = pt - off;                      // flow coordinates
     const qreal rowF = std::floor(fp.y() / qMax(1.0, painted.cellH));
     const qreal X = rowF * painted.foldW + fp.x();
-    const qreal itemF = (X - painted.basePx) / qMax(1.0, painted.cellW);
-    const int itemIdx = qBound(0, int(std::floor(itemF)), count - 1);
+    const qreal cellW = qMax(1.0, painted.cellW);
+    const qreal icon = qMax(1.0, painted.iconSize);
+    const int itemIdx =
+        qBound(0, int(std::floor((X - painted.basePx) / cellW)), count - 1);
     m_zoomPinFrac = QPointF(
-        qBound(0.0, itemF - itemIdx, 1.0),
-        qBound(0.0, fp.y() / qMax(1.0, painted.cellH) - rowF, 1.0));
+        (X - painted.basePx - qreal(itemIdx) * cellW
+         - GridDelegate::thumbInsetX()) / icon,
+        (fp.y() - rowF * painted.cellH - GridDelegate::thumbPadTop()) / icon);
     m_zoomPinItem = itemIdx;
     m_zoomPinFlowFrom = painted;
     m_zoomPinFlowTo = painted;
@@ -821,6 +850,15 @@ GridView::FlowParams GridView::pinRelativeFlow(const LayoutParams& p,
     f.basePx = (qreal(vi % cols) - qreal(pinItem)) * p.cell.width();
     f.iconSize = iconSize;
     return f;
+}
+
+// Fixed chrome + thumb fraction × icon size. iconSize and cellH lerp
+// together linearly (lerpFlow), so this is exact for every animation
+// frame, not just the endpoints.
+QPointF GridView::pinOffset(qreal iconSize) const
+{
+    return QPointF(GridDelegate::thumbInsetX() + m_zoomPinFrac.x() * iconSize,
+                   GridDelegate::thumbPadTop() + m_zoomPinFrac.y() * iconSize);
 }
 
 void GridView::startZoomPinAnim(bool keepDeadline)
@@ -953,10 +991,10 @@ void GridView::commitZoomGesture()
         const int cols = qMax(1, cur.cols);
         const int vi = qMax(0, m_zoomPinItem) + cur.gridOffset;
         m_zoomPinFlowTo = pinRelativeFlow(cur, m_iconSize, m_zoomPinItem);
-        m_zoomPinPointTo = QPointF(
-            (qreal(vi % cols) + m_zoomPinFrac.x()) * cur.cell.width(),
-            (qreal(vi / cols - cur.firstRow) + m_zoomPinFrac.y())
-                * cur.cell.height());
+        m_zoomPinPointTo = QPointF(qreal(vi % cols) * cur.cell.width(),
+                                   qreal(vi / cols - cur.firstRow)
+                                       * cur.cell.height())
+            + pinOffset(m_iconSize);
 
         if (wasRunning
             || (m_zoomPinPointFrom - m_zoomPinPointTo).manhattanLength()
@@ -1470,10 +1508,10 @@ void GridView::retargetPinSettle()
     const int cols = qMax(1, cur.cols);
     const int vi = qMax(0, m_zoomPinItem) + cur.gridOffset;
     m_zoomPinFlowTo = pinRelativeFlow(cur, m_iconSize, m_zoomPinItem);
-    m_zoomPinPointTo = QPointF(
-        (qreal(vi % cols) + m_zoomPinFrac.x()) * cur.cell.width(),
-        (qreal(vi / cols - cur.firstRow) + m_zoomPinFrac.y())
-            * cur.cell.height());
+    m_zoomPinPointTo = QPointF(qreal(vi % cols) * cur.cell.width(),
+                               qreal(vi / cols - cur.firstRow)
+                                   * cur.cell.height())
+        + pinOffset(m_iconSize);
     startZoomPinAnim(true);
     if (m_zoomPinSettling)
         m_zoomPinSettling =

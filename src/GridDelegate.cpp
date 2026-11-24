@@ -27,11 +27,13 @@ void GridDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
     QRect rect = option.rect;
     const bool selected = option.state & QStyle::State_Selected;
 
-    // Vertical cell layout (must mirror sizeHint): 6px pad, icon area,
-    // 4px gap, one text line, 6px pad. Symmetric pads: a portrait image
-    // (full icon height) keeps the same distance to the frame at the top
-    // as the label at the bottom.
-    QRect thumbRect(rect.x() + 4, rect.y() + 6, m_iconSize, m_iconSize);
+    // Vertical cell layout (must mirror sizeHint): thumbPadTop() pad, icon
+    // area, 4px gap, one text line, 6px pad. Symmetric pads: a portrait
+    // image (full icon height) keeps the same distance to the frame at the
+    // top as the label at the bottom. Horizontally the thumb is centred,
+    // which for the sizeHint cell width is exactly thumbInsetX().
+    QRect thumbRect(rect.x() + thumbInsetX(), rect.y() + thumbPadTop(),
+                    m_iconSize, m_iconSize);
     thumbRect.moveLeft(rect.x() + (rect.width() - m_iconSize) / 2);
 
     // Letterbox areas around non-square images: keep the selection highlight
@@ -253,7 +255,9 @@ void GridDelegate::drawTagBadges(QPainter* painter, const QRect& dest,
 
 QSize GridDelegate::sizeHint(const QStyleOptionViewItem& option, const QModelIndex&) const
 {
-    // Must mirror the vertical layout in paint(): 6 + icon + 4 + text + 6
-    return QSize(m_iconSize + 8,
-                 m_iconSize + QFontMetrics(option.font).height() + 16);
+    // Must mirror the layout in paint(): thumbPadTop() + icon + 4 + text + 6
+    // vertically, thumbInsetX() on both sides horizontally
+    return QSize(m_iconSize + 2 * thumbInsetX(),
+                 m_iconSize + thumbPadTop() + 4
+                     + QFontMetrics(option.font).height() + 6);
 }
