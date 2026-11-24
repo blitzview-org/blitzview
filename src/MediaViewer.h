@@ -2,6 +2,7 @@
 
 #include <QList>
 #include <QPoint>
+#include <QPointF>
 #include <QWidget>
 #include "MediaItem.h"
 
@@ -12,12 +13,12 @@ class QGraphicsView;
 class QLabel;
 class QMediaPlayer;
 class QPushButton;
-class QScrollArea;
 class QSlider;
 class QStackedWidget;
 class QTimer;
 class VideoSurface;
 class EdgeNavZone;
+class ImageCanvas;
 
 // Unified single-media view for images AND videos. No overlays: the control
 // bar occupies a bottom strip in both modes (manual geometry, no QLayout).
@@ -63,7 +64,12 @@ signals:
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
+    // Wheel and mouse input for the image page arrive HERE: the canvas and
+    // the edge zones (Ctrl held) ignore them, so they propagate to the viewer
     void wheelEvent(QWheelEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void showEvent(QShowEvent* event) override;
@@ -83,7 +89,8 @@ private slots:
 
 private:
     void loadCurrent();
-    void applyZoom();
+    bool isImagePage() const;
+    void endPan();     // release the pan grab (also on close / image switch)
     void updateGeometry_();    // manual geometry for stack and bar
     void setControlBarVisible(bool visible);
     void onIdleTimeout();      // fullscreen: hides the cursor when idle
@@ -93,8 +100,7 @@ private:
     // Pages. Video page: either the software surface (default) or the
     // experimental GL view (BLITZVIEW_VIDEO_GL=1) — exactly one is non-null.
     QStackedWidget*     m_stack        = nullptr;
-    QScrollArea*        m_scrollArea   = nullptr;   // image page
-    QLabel*             m_imageLabel   = nullptr;
+    ImageCanvas*        m_canvas       = nullptr;   // image page
     QGraphicsView*      m_videoView    = nullptr;   // video page (GL viewport)
     QGraphicsScene*     m_videoScene   = nullptr;
     QGraphicsVideoItem* m_videoItem    = nullptr;
@@ -139,9 +145,15 @@ private:
     int  m_focusBorderPx     = 0;
     bool m_focusBorderActive = false;
 
-    // Image zoom state (ported from the former ImageViewer)
-    QPixmap m_original;
-    double  m_zoom      = 1.0;
-    bool    m_fitted    = true;
-    bool    m_fitOnShow = false;
+    // Wheel: one image / one zoom step per 120-unit notch, remainder kept
+    int m_navWheelAccum  = 0;
+    int m_zoomWheelAccum = 0;
+
+    // Ctrl+left press on the image page: becomes a PAN once the cursor
+    // moves past QApplication::startDragDistance(); a release before that
+    // does nothing (same decision rule as the grid's Ctrl-click vs Ctrl-drag)
+    bool    m_ctrlPressPending = false;
+    bool    m_panActive        = false;
+    QPointF m_pressGlobal;      // where the Ctrl+press went down
+    QPointF m_panLastGlobal;    // raw mouse, delta base for the 1:1 pan
 };

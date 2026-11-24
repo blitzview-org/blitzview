@@ -1,6 +1,9 @@
 #include "MemoryImageReader.h"
 #include "MediaViewer.h"
 
+#include "ImageCanvas.h"
+#include "SlideTrace.h"
+
 #include "Shortcuts.h"
 #include "AppSettings.h"
 #include "PageBackground.h"
@@ -20,7 +23,6 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
-#include <QScrollArea>
 #include <QShortcut>
 #include <QSlider>
 #include <QPainterPath>
@@ -31,6 +33,7 @@
 #include <QVideoSink>
 #include <QWheelEvent>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 
 // ---------------------------------------------------------------------------
@@ -109,6 +112,9 @@ public:
     }
 
     std::function<void()> onClick;
+    // When set and returning true, a Ctrl+left press is NOT a navigation
+    // click: it is ignored so it propagates to the parent (pan grab)
+    std::function<bool()> ignoreCtrlPress;
 
     void setNavEnabled(bool enabled)
     {
@@ -160,6 +166,11 @@ protected:
 
     void mousePressEvent(QMouseEvent* event) override
     {
+        const bool ctrl = event->modifiers() & Qt::ControlModifier;
+        if (ctrl && ignoreCtrlPress && ignoreCtrlPress()) {
+            event->ignore();
+            return;
+        }
         if (event->button() == Qt::LeftButton && m_enabled && onClick) {
             onClick();
             return;
@@ -300,8 +311,6 @@ MediaViewer::MediaViewer(QWidget* parent)
     setStyleSheet(QStringLiteral(
         "MediaViewer { background: black; }"
         "QWidget#controlBar { background: rgba(20,20,20,0.85); }"
-        "MediaViewer QScrollArea { background: transparent; border: none; }"
-        "MediaViewer QScrollArea QWidget { background: transparent; }"
         "MediaViewer QPushButton {"
         "  background: transparent; color: #dddddd; border: none;"
         "  border-radius: 4px; padding: 6px 12px; font-size: 14px;"
@@ -324,17 +333,9 @@ MediaViewer::MediaViewer(QWidget* parent)
         .arg(accent));
     setAttribute(Qt::WA_StyledBackground, true);
 
-    // --- Image page ---
-    m_scrollArea = new QScrollArea(this);
-    m_scrollArea->setAlignment(Qt::AlignCenter);
-    m_scrollArea->setWidgetResizable(false);
-    m_scrollArea->setFrameShape(QFrame::NoFrame);
-    m_scrollArea->setFocusPolicy(Qt::NoFocus);
-
-    m_imageLabel = new QLabel;
-    m_imageLabel->setAlignment(Qt::AlignCenter);
-    m_imageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    m_scrollArea->setWidget(m_imageLabel);
+    // --- Image page: transform-painting canvas (zoom/pan state lives there,
+    // the input handling in this class's wheel/mouse handlers) ---
+    m_canvas = new ImageCanvas(this);
 
     m_player = new QMediaPlayer(this);
     m_audio  = new QAudioOutput(this);
@@ -373,7 +374,7 @@ MediaViewer::MediaViewer(QWidget* parent)
     }
 
     m_stack = new QStackedWidget(this);
-    m_stack->addWidget(m_scrollArea);
+    m_stack->addWidget(m_canvas);
     m_stack->addWidget(m_videoPage);
 
     // --- Control bar ---
@@ -453,16 +454,18 @@ MediaViewer::MediaViewer(QWidget* parent)
                                             : static_cast<QWidget*>(m_videoSurface);
     videoMouseTarget->setMouseTracking(true);
     videoMouseTarget->installEventFilter(this);
-    m_scrollArea->viewport()->setMouseTracking(true);
-    m_scrollArea->viewport()->installEventFilter(this);
-    m_imageLabel->setMouseTracking(true);
-    m_imageLabel->installEventFilter(this);
+    m_canvas->setMouseTracking(true);
+    m_canvas->installEventFilter(this);
 
     // --- Edge navigation overlays (over the medium, both modes) ---
     m_edgeLeft  = new EdgeNavZone(true, this);
     m_edgeRight = new EdgeNavZone(false, this);
     m_edgeLeft->onClick  = [this]() { showPrev(); };
     m_edgeRight->onClick = [this]() { showNext(); };
+    // Ctrl+press over a zone is a PAN grab, not a navigation click: the zone
+    // ignores it and the event propagates to the viewer's mousePressEvent
+    m_edgeLeft->ignoreCtrlPress  = [this]() { return isImagePage(); };
+    m_edgeRight->ignoreCtrlPress = [this]() { return isImagePage(); };
     // The zones sit over the media pages, so the fullscreen mouse logic
     // (cursor un-hide, bottom bar zone) must also see their moves
     m_edgeLeft->installEventFilter(this);
@@ -520,8 +523,6 @@ void MediaViewer::setMedia(const QList<MediaItem>& items, int currentIndex)
 {
     m_items     = items;
     m_current   = qBound(0, currentIndex, int(items.size()) - 1);
-    m_fitted    = true;
-    m_fitOnShow = true;
     loadCurrent();
 }
 
@@ -558,28 +559,18 @@ void MediaViewer::loadCurrent()
     } else {
         m_player->stop();
         m_player->setSource(QUrl());
-        m_stack->setCurrentWidget(m_scrollArea);
+        m_stack->setCurrentWidget(m_canvas);
+        endPan();
 
         MemoryImageReader mem(item.filePath, MemoryImageReader::Gate::None);   // UI thread: never queue behind workers
         QImageReader& reader = *mem.reader;
         reader.setAutoTransform(true);
         applyPaperBackground(reader, item.fileType);
         const QImage img = reader.read();
-        if (img.isNull()) {
-            m_original = QPixmap();
-            m_imageLabel->setText(tr("Failed to load image:\n%1").arg(item.filePath));
-            m_imageLabel->adjustSize();
-        } else {
-            m_original = QPixmap::fromImage(img);
-            if (m_fitted) {
-                if (isVisible())
-                    fitToWindow();
-                else
-                    m_fitOnShow = true;
-            } else {
-                applyZoom();
-            }
-        }
+        if (img.isNull())
+            m_canvas->setErrorText(tr("Failed to load image:\n%1").arg(item.filePath));
+        else
+            m_canvas->setImage(img);   // every image opens fitted
     }
 }
 
@@ -621,8 +612,8 @@ void MediaViewer::updateGeometry_()
 
 void MediaViewer::refreshFocusBorder()
 {
-    // The reserved margin resizes right away; the page viewports' resize
-    // events re-fit a fitted image automatically (see eventFilter)
+    // The reserved margin resizes right away; the canvas refits a fitted
+    // image in its own resizeEvent
     updateGeometry_();
     update();
 }
@@ -663,7 +654,6 @@ void MediaViewer::showPrev()
 {
     if (m_current > 0) {
         --m_current;
-        m_fitted = true;
         loadCurrent();
     }
 }
@@ -672,34 +662,31 @@ void MediaViewer::showNext()
 {
     if (m_current < m_items.size() - 1) {
         ++m_current;
-        m_fitted = true;
         loadCurrent();
     }
 }
 
-// --- Image zoom (ported from the former ImageViewer) ------------------------
+// --- Image zoom / pan ---------------------------------------------------------
 
-void MediaViewer::applyZoom()
+bool MediaViewer::isImagePage() const
 {
-    if (m_original.isNull())
-        return;
-    const QSize sz = m_original.size() * m_zoom;
-    m_imageLabel->setPixmap(m_original.scaled(sz, Qt::KeepAspectRatio,
-                                              Qt::SmoothTransformation));
-    m_imageLabel->resize(sz);
+    return !m_items.isEmpty() && !m_items.at(m_current).isVideo;
 }
 
 void MediaViewer::fitToWindow()
 {
-    if (m_original.isNull())
+    m_canvas->fitToWindow();
+}
+
+void MediaViewer::endPan()
+{
+    m_ctrlPressPending = false;
+    if (!m_panActive)
         return;
-    const QSize avail = m_scrollArea->viewport()->size();
-    const QPixmap scaled = m_original.scaled(avail, Qt::KeepAspectRatio,
-                                             Qt::SmoothTransformation);
-    m_zoom = static_cast<double>(scaled.width()) / m_original.width();
-    m_imageLabel->setPixmap(scaled);
-    m_imageLabel->resize(scaled.size());
-    m_fitted = true;
+    m_panActive = false;
+    QGuiApplication::restoreOverrideCursor();
+    TRACE_SLIDE("viewer pan stop origin=(%.1f,%.1f)",
+                m_canvas->origin().x(), m_canvas->origin().y());
 }
 
 // --- Video controls ----------------------------------------------------------
@@ -832,8 +819,6 @@ bool MediaViewer::eventFilter(QObject* watched, QEvent* event)
             const QSizeF s = static_cast<QResizeEvent*>(event)->size();
             m_videoItem->setSize(s);
             m_videoScene->setSceneRect(QRectF(QPointF(0, 0), s));
-        } else if (watched == m_scrollArea->viewport() && m_fitted) {
-            fitToWindow();
         }
         break;
     case QEvent::MouseMove: {
@@ -925,29 +910,110 @@ void MediaViewer::keyPressEvent(QKeyEvent* event)
     }
 }
 
+// Zoom factor per wheel notch. 1.25 (not the former 1.1): a notch should be a
+// visible step, and 10x is reached in ~10 notches from 1:1
+static constexpr double kViewerZoomStepFactor = 1.25;
+
 void MediaViewer::wheelEvent(QWheelEvent* event)
 {
-    // Wheel zoom only for images
-    if (m_items.isEmpty() || m_items.at(m_current).isVideo || m_original.isNull()) {
+    // Reached from the canvas, the edge zones and the bar (none of them
+    // consume wheel events), so one handler decides for the whole viewer.
+    // Plain wheel = prev/next; Ctrl+wheel = zoom anchored on the cursor.
+    // Both step once per 120-unit notch and keep the remainder (high-res
+    // wheels/touchpads). inverted(): "natural" scrolling flips the sign.
+    if (m_items.isEmpty()) {
         QWidget::wheelEvent(event);
         return;
     }
+    int delta = event->angleDelta().y();
+    if (delta == 0)
+        delta = event->angleDelta().x();
+    if (event->inverted())
+        delta = -delta;
+    event->accept();
 
-    const double factor = (event->angleDelta().y() > 0) ? 1.1 : 0.9;
-    const double newZoom = std::clamp(m_zoom * factor, 0.1, 10.0);
-    if (qFuzzyCompare(newZoom, m_zoom))
+    if (event->modifiers() & Qt::ControlModifier) {
+        if (!isImagePage() || !m_canvas->hasImage())
+            return;                                 // video: no zoom (yet)
+        m_zoomWheelAccum += delta;
+        const int steps = m_zoomWheelAccum / 120;
+        m_zoomWheelAccum -= steps * 120;
+        if (steps == 0)
+            return;
+        const QPointF cursor = m_canvas->mapFromGlobal(event->globalPosition());
+        const double factor = std::pow(kViewerZoomStepFactor, steps);
+        m_canvas->zoomAt(cursor, factor);
         return;
-    m_zoom   = newZoom;
-    m_fitted = false;
-    applyZoom();
+    }
+
+    m_navWheelAccum += delta;
+    const int steps = m_navWheelAccum / 120;
+    m_navWheelAccum -= steps * 120;
+    for (int i = 0; i < steps; ++i)       // wheel up = previous
+        showPrev();
+    for (int i = 0; i > steps; --i)       // wheel down = next
+        showNext();
+}
+
+void MediaViewer::mousePressEvent(QMouseEvent* event)
+{
+    // Ctrl+left on the image page (canvas or edge zone, which ignores the
+    // Ctrl+press on purpose): arm a pan — decided in mouseMoveEvent once the
+    // cursor has moved past startDragDistance; a release before that does
+    // nothing. Same rule as the grid's Ctrl-click vs Ctrl-drag.
+    if (event->button() == Qt::LeftButton
+        && (event->modifiers() & Qt::ControlModifier)
+        && isImagePage() && m_canvas->hasImage()) {
+        m_ctrlPressPending = true;
+        m_pressGlobal = event->globalPosition();
+        event->accept();
+        return;
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void MediaViewer::mouseMoveEvent(QMouseEvent* event)
+{
+    if (m_ctrlPressPending && (event->buttons() & Qt::LeftButton)) {
+        const QPointF g = event->globalPosition();
+        if (!m_panActive
+            && (g - m_pressGlobal).manhattanLength()
+                   >= QApplication::startDragDistance()) {
+            m_panActive = true;
+            m_panLastGlobal = m_pressGlobal;   // no jump: count from the press point
+            QGuiApplication::setOverrideCursor(Qt::ClosedHandCursor);
+            TRACE_SLIDE("viewer pan start press=(%.1f,%.1f) origin=(%.1f,%.1f)",
+                        m_pressGlobal.x(), m_pressGlobal.y(),
+                        m_canvas->origin().x(), m_canvas->origin().y());
+        }
+        if (m_panActive) {
+            // 1:1 with the RAW mouse, not with the clamped result: a drag
+            // past the edge keeps tracking the real cursor
+            m_canvas->panBy(g - m_panLastGlobal);
+            m_panLastGlobal = g;
+        }
+        event->accept();
+        return;
+    }
+    QWidget::mouseMoveEvent(event);
+}
+
+void MediaViewer::mouseReleaseEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton && m_ctrlPressPending) {
+        endPan();
+        event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
 }
 
 void MediaViewer::resizeEvent(QResizeEvent* event)
 {
+    // The canvas refits/re-clamps itself in its own resizeEvent, once the
+    // manual geometry has given it its final size
     QWidget::resizeEvent(event);
     updateGeometry_();
-    if (m_fitted)
-        fitToWindow();
 }
 
 void MediaViewer::showEvent(QShowEvent* event)
@@ -963,13 +1029,6 @@ void MediaViewer::showEvent(QShowEvent* event)
 
     QWidget::showEvent(event);
     updateGeometry_();
-    if (m_fitOnShow && m_fitted) {
-        m_fitOnShow = false;
-        QTimer::singleShot(0, this, [this]() {
-            if (isVisible() && m_fitted)
-                fitToWindow();
-        });
-    }
 }
 
 void MediaViewer::closeEvent(QCloseEvent* event)
@@ -978,6 +1037,7 @@ void MediaViewer::closeEvent(QCloseEvent* event)
     // Also leave fullscreen so the next open starts windowed.
     m_player->stop();
     m_idleTimer->stop();
+    endPan();
     // Never carry the presentation-mode flag into a later windowed open of
     // the reused instance
     m_closeOnFullscreenExit = false;
